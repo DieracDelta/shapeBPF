@@ -264,6 +264,7 @@ pub struct App {
     pub last_error: Option<String>,
     pub rule_form: Option<RuleForm>,
     pub tree_view: bool,
+    pub wire_rate_view: bool,
     pub collapsed_cgroups: HashSet<String>,
     /// Number of visible rows in tree view (updated during draw)
     pub tree_visible_count: usize,
@@ -293,6 +294,7 @@ impl App {
             last_error: None,
             rule_form: None,
             tree_view: false,
+            wire_rate_view: false,
             collapsed_cgroups: HashSet::new(),
             tree_visible_count: 0,
             pending_key: None,
@@ -734,6 +736,8 @@ impl App {
                     cgroup_path: String::new(),
                     tx_bytes: 0,
                     rx_bytes: 0,
+                    wire_tx_bytes: 0,
+                    wire_rx_bytes: 0,
                 };
                 self.rule_form = Some(RuleForm::from_process(&blank));
                 self.mode = AppMode::CreateRule;
@@ -742,6 +746,9 @@ impl App {
                 self.tree_view = !self.tree_view;
                 self.selected_index = 0;
                 self.update_tree_visible_count();
+            }
+            KeyCode::Char('w') if self.mode == AppMode::ProcessList => {
+                self.wire_rate_view = !self.wire_rate_view;
             }
             KeyCode::Char(' ') if self.mode == AppMode::ProcessList && self.tree_view => {
                 self.toggle_tree_node();
@@ -866,6 +873,8 @@ impl App {
                         cgroup_path: stats.cgroup_path.clone(),
                         tx_bytes: 0,
                         rx_bytes: 0,
+                        wire_tx_bytes: 0,
+                        wire_rx_bytes: 0,
                     });
                     self.rule_form = Some(RuleForm::from_process(&proc));
                     self.mode = AppMode::CreateRule;

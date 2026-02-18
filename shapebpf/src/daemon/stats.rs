@@ -14,6 +14,14 @@ pub struct StatsCollector {
     prev_pid_traffic: HashMap<u32, TrafficStats>,
     last_traffic_update: Option<std::time::Instant>,
     last_pid_traffic_update: Option<std::time::Instant>,
+    /// cgroup_id -> per-second wire rate (post-EDT, computed from deltas)
+    wire_traffic: HashMap<u64, TrafficStats>,
+    /// pid -> per-second wire rate (post-EDT, computed from deltas)
+    pid_wire_traffic: HashMap<u32, TrafficStats>,
+    prev_wire_traffic: HashMap<u64, TrafficStats>,
+    prev_pid_wire_traffic: HashMap<u32, TrafficStats>,
+    last_wire_traffic_update: Option<std::time::Instant>,
+    last_pid_wire_traffic_update: Option<std::time::Instant>,
     /// cgroup_id -> rate config (if any)
     configs: HashMap<u64, RateConfig>,
     /// cgroup_id -> cgroup path
@@ -37,6 +45,12 @@ impl StatsCollector {
             prev_pid_traffic: HashMap::new(),
             last_traffic_update: None,
             last_pid_traffic_update: None,
+            wire_traffic: HashMap::new(),
+            pid_wire_traffic: HashMap::new(),
+            prev_wire_traffic: HashMap::new(),
+            prev_pid_wire_traffic: HashMap::new(),
+            last_wire_traffic_update: None,
+            last_pid_wire_traffic_update: None,
             configs: HashMap::new(),
             cgroup_paths: HashMap::new(),
             processes: HashMap::new(),
@@ -129,6 +143,88 @@ impl StatsCollector {
         self.last_pid_traffic_update = Some(now);
     }
 
+    pub fn update_wire_traffic(&mut self, stats: Vec<(u64, TrafficStats)>) {
+        let now = std::time::Instant::now();
+        let elapsed_secs = self
+            .last_wire_traffic_update
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(1.0)
+            .max(0.001);
+
+        self.wire_traffic.clear();
+        for &(cgroup_id, ref cumulative) in &stats {
+            let rate = if let Some(prev) = self.prev_wire_traffic.get(&cgroup_id) {
+                TrafficStats {
+                    tx_bytes: (cumulative.tx_bytes.saturating_sub(prev.tx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    rx_bytes: (cumulative.rx_bytes.saturating_sub(prev.rx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    tx_packets: (cumulative.tx_packets.saturating_sub(prev.tx_packets) as f64
+                        / elapsed_secs) as u64,
+                    rx_packets: (cumulative.rx_packets.saturating_sub(prev.rx_packets) as f64
+                        / elapsed_secs) as u64,
+                    drops: cumulative.drops,
+                }
+            } else {
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: cumulative.drops,
+                }
+            };
+            self.wire_traffic.insert(cgroup_id, rate);
+        }
+
+        self.prev_wire_traffic.clear();
+        for (cgroup_id, cumulative) in stats {
+            self.prev_wire_traffic.insert(cgroup_id, cumulative);
+        }
+        self.last_wire_traffic_update = Some(now);
+    }
+
+    pub fn update_pid_wire_traffic(&mut self, stats: Vec<(u32, TrafficStats)>) {
+        let now = std::time::Instant::now();
+        let elapsed_secs = self
+            .last_pid_wire_traffic_update
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(1.0)
+            .max(0.001);
+
+        self.pid_wire_traffic.clear();
+        for &(pid, ref cumulative) in &stats {
+            let rate = if let Some(prev) = self.prev_pid_wire_traffic.get(&pid) {
+                TrafficStats {
+                    tx_bytes: (cumulative.tx_bytes.saturating_sub(prev.tx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    rx_bytes: (cumulative.rx_bytes.saturating_sub(prev.rx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    tx_packets: (cumulative.tx_packets.saturating_sub(prev.tx_packets) as f64
+                        / elapsed_secs) as u64,
+                    rx_packets: (cumulative.rx_packets.saturating_sub(prev.rx_packets) as f64
+                        / elapsed_secs) as u64,
+                    drops: cumulative.drops,
+                }
+            } else {
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: cumulative.drops,
+                }
+            };
+            self.pid_wire_traffic.insert(pid, rate);
+        }
+
+        self.prev_pid_wire_traffic.clear();
+        for (pid, cumulative) in stats {
+            self.prev_pid_wire_traffic.insert(pid, cumulative);
+        }
+        self.last_pid_wire_traffic_update = Some(now);
+    }
+
     pub fn update_processes(&mut self, procs: Vec<ProcessInfo>) {
         self.processes.clear();
         for p in &procs {
@@ -201,9 +297,25 @@ impl StatsCollector {
                         p.tx_bytes = pid_stats.tx_bytes;
                         p.rx_bytes = pid_stats.rx_bytes;
                     }
+                    if let Some(pid_wire) = self.pid_wire_traffic.get(&p.pid) {
+                        p.wire_tx_bytes = pid_wire.tx_bytes;
+                        p.wire_rx_bytes = pid_wire.rx_bytes;
+                    }
                     p
                 })
                 .collect();
+
+            let wire_stats = self
+                .wire_traffic
+                .get(&cgroup_id)
+                .copied()
+                .unwrap_or(TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: 0,
+                });
 
             let matched_rule_name = self.rule_assignments.get(&cgroup_id).cloned();
             let created_by_shapebpf = self.created_cgroups.contains_key(&cgroup_path);
@@ -219,6 +331,7 @@ impl StatsCollector {
                 cgroup_id,
                 cgroup_path,
                 stats: *stats,
+                wire_stats,
                 config: self.configs.get(&cgroup_id).copied(),
                 processes,
                 matched_rule_name,
@@ -246,9 +359,25 @@ impl StatsCollector {
                         p.tx_bytes = pid_stats.tx_bytes;
                         p.rx_bytes = pid_stats.rx_bytes;
                     }
+                    if let Some(pid_wire) = self.pid_wire_traffic.get(&p.pid) {
+                        p.wire_tx_bytes = pid_wire.tx_bytes;
+                        p.wire_rx_bytes = pid_wire.rx_bytes;
+                    }
                     p
                 })
                 .collect();
+
+            let wire_stats = self
+                .wire_traffic
+                .get(&cgroup_id)
+                .copied()
+                .unwrap_or(TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: 0,
+                });
 
             let matched_rule_name = self.rule_assignments.get(&cgroup_id).cloned();
             let created_by_shapebpf = self.created_cgroups.contains_key(&cgroup_path);
@@ -270,6 +399,7 @@ impl StatsCollector {
                     rx_packets: 0,
                     drops: 0,
                 },
+                wire_stats,
                 config: self.configs.get(&cgroup_id).copied(),
                 processes,
                 matched_rule_name,

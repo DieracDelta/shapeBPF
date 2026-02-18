@@ -210,6 +210,60 @@ impl EbpfLoader {
         Ok(results)
     }
 
+    /// Read all wire-rate traffic stats (post-EDT) from the qdisc's BPF map.
+    pub fn read_wire_traffic_stats(&self) -> Result<Vec<(u64, TrafficStats)>> {
+        let obj = match self.qdisc_obj.as_ref() {
+            Some(o) => o,
+            None => return Ok(Vec::new()),
+        };
+        let map = obj
+            .maps()
+            .find(|m| m.name() == OsStr::new("WIRE_TRAFFIC_STATS"))
+            .context("WIRE_TRAFFIC_STATS map not found")?;
+        let mut results = Vec::new();
+        for key in map.keys() {
+            if key.len() != 8 {
+                continue;
+            }
+            let cgroup_id = u64::from_ne_bytes(key[..8].try_into().unwrap());
+            if let Some(val_bytes) = map.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+                if val_bytes.len() >= core::mem::size_of::<TrafficStats>() {
+                    let stats: TrafficStats =
+                        unsafe { core::ptr::read_unaligned(val_bytes.as_ptr() as *const _) };
+                    results.push((cgroup_id, stats));
+                }
+            }
+        }
+        Ok(results)
+    }
+
+    /// Read per-PID wire-rate traffic stats (post-EDT) from the qdisc's BPF map.
+    pub fn read_pid_wire_traffic_stats(&self) -> Result<Vec<(u32, TrafficStats)>> {
+        let obj = match self.qdisc_obj.as_ref() {
+            Some(o) => o,
+            None => return Ok(Vec::new()),
+        };
+        let map = obj
+            .maps()
+            .find(|m| m.name() == OsStr::new("PID_WIRE_TRAFFIC_STATS"))
+            .context("PID_WIRE_TRAFFIC_STATS map not found")?;
+        let mut results = Vec::new();
+        for key in map.keys() {
+            if key.len() != 4 {
+                continue;
+            }
+            let pid = u32::from_ne_bytes(key[..4].try_into().unwrap());
+            if let Some(val_bytes) = map.lookup(&key, libbpf_rs::MapFlags::ANY)? {
+                if val_bytes.len() >= core::mem::size_of::<TrafficStats>() {
+                    let stats: TrafficStats =
+                        unsafe { core::ptr::read_unaligned(val_bytes.as_ptr() as *const _) };
+                    results.push((pid, stats));
+                }
+            }
+        }
+        Ok(results)
+    }
+
     /// Read all process events from the aya BPF map.
     pub fn read_process_events(&self) -> Result<Vec<(u32, ProcessEvent)>> {
         let map = self

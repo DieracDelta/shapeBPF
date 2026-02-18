@@ -138,6 +138,14 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 let mut s = stats_clone.lock().await;
                 s.update_pid_traffic(pid_traffic);
             }
+            if let Ok(wire_traffic) = loader.read_wire_traffic_stats() {
+                let mut s = stats_clone.lock().await;
+                s.update_wire_traffic(wire_traffic);
+            }
+            if let Ok(pid_wire) = loader.read_pid_wire_traffic_stats() {
+                let mut s = stats_clone.lock().await;
+                s.update_pid_wire_traffic(pid_wire);
+            }
         }
     });
 
@@ -196,6 +204,8 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                         cgroup_path: cgroup_path.clone(),
                         tx_bytes: 0,
                         rx_bytes: 0,
+                        wire_tx_bytes: 0,
+                        wire_rx_bytes: 0,
                     };
 
                     let rules = rules_clone.lock().await;

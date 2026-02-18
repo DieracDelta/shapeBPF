@@ -25,6 +25,8 @@ pub struct CgroupTreeRow {
     pub full_path: String,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
+    pub wire_tx_bytes: u64,
+    pub wire_rx_bytes: u64,
     pub drops: u64,
     pub priority: String,
     pub limit: String,
@@ -154,7 +156,7 @@ fn flatten_node(
 
     let prefix = format!("{connector}{indicator} ");
 
-    let (tx_bytes, rx_bytes, drops, priority, limit, processes) =
+    let (tx_bytes, rx_bytes, wire_tx_bytes, wire_rx_bytes, drops, priority, limit, processes) =
         if let Some(idx) = node.stat_index {
             let s = &stats[idx];
             let procs: String = s
@@ -185,6 +187,8 @@ fn flatten_node(
             (
                 s.stats.tx_bytes,
                 s.stats.rx_bytes,
+                s.wire_stats.tx_bytes,
+                s.wire_stats.rx_bytes,
                 s.stats.drops,
                 priority,
                 limit,
@@ -195,13 +199,17 @@ fn flatten_node(
             let indices = node.collect_stat_indices();
             let mut tx = 0u64;
             let mut rx = 0u64;
+            let mut wtx = 0u64;
+            let mut wrx = 0u64;
             let mut dr = 0u64;
             for &idx in &indices {
                 tx += stats[idx].stats.tx_bytes;
                 rx += stats[idx].stats.rx_bytes;
+                wtx += stats[idx].wire_stats.tx_bytes;
+                wrx += stats[idx].wire_stats.rx_bytes;
                 dr += stats[idx].stats.drops;
             }
-            (tx, rx, dr, "-".to_string(), "-".to_string(), String::new())
+            (tx, rx, wtx, wrx, dr, "-".to_string(), "-".to_string(), String::new())
         };
 
     // Clear inline processes when sub-rows will be shown
@@ -218,6 +226,8 @@ fn flatten_node(
         full_path: node.full_path.clone(),
         tx_bytes,
         rx_bytes,
+        wire_tx_bytes,
+        wire_rx_bytes,
         drops,
         priority,
         limit,
@@ -279,6 +289,8 @@ fn flatten_node(
                 full_path: node.full_path.clone(),
                 tx_bytes: proc.tx_bytes,
                 rx_bytes: proc.rx_bytes,
+                wire_tx_bytes: proc.wire_tx_bytes,
+                wire_rx_bytes: proc.wire_rx_bytes,
                 drops: 0,
                 priority: String::new(),
                 limit: String::new(),
@@ -305,11 +317,16 @@ pub fn draw(f: &mut Frame, app: &App) {
     notification::draw_notification(f, chunks[0], app.unclassified.len());
 
     // Main bandwidth table
+    let (tx_label, rx_label) = if app.wire_rate_view {
+        ("Wire TX/s", "Wire RX/s")
+    } else {
+        ("TX/s", "RX/s")
+    };
     let header = Row::new(vec![
         Cell::from("Cgroup"),
         Cell::from("Processes"),
-        Cell::from("TX/s"),
-        Cell::from("RX/s"),
+        Cell::from(tx_label),
+        Cell::from(rx_label),
         Cell::from("Drops"),
         Cell::from("Priority"),
         Cell::from("Limit"),
@@ -331,12 +348,17 @@ pub fn draw(f: &mut Frame, app: &App) {
                 } else {
                     Style::default()
                 };
+                let (tx, rx) = if app.wire_rate_view {
+                    (tr.wire_tx_bytes, tr.wire_rx_bytes)
+                } else {
+                    (tr.tx_bytes, tr.rx_bytes)
+                };
                 match &tr.kind {
                     TreeRowKind::Process { .. } => Row::new(vec![
                         Cell::from(tr.prefix.clone()),
                         Cell::from(tr.processes.clone()),
-                        Cell::from(format_rate(tr.tx_bytes)),
-                        Cell::from(format_rate(tr.rx_bytes)),
+                        Cell::from(format_rate(tx)),
+                        Cell::from(format_rate(rx)),
                         Cell::from(""),
                         Cell::from(""),
                         Cell::from(""),
@@ -345,8 +367,8 @@ pub fn draw(f: &mut Frame, app: &App) {
                     TreeRowKind::CgroupNode => Row::new(vec![
                         Cell::from(format!("{}{}", tr.prefix, tr.label)),
                         Cell::from(truncate(&tr.processes, 25)),
-                        Cell::from(format_rate(tr.tx_bytes)),
-                        Cell::from(format_rate(tr.rx_bytes)),
+                        Cell::from(format_rate(tx)),
+                        Cell::from(format_rate(rx)),
                         Cell::from(tr.drops.to_string()),
                         Cell::from(tr.priority.clone()),
                         Cell::from(tr.limit.clone()),
@@ -388,11 +410,16 @@ pub fn draw(f: &mut Frame, app: &App) {
                     .map(|c| c.priority.to_string())
                     .unwrap_or_else(|| "-".to_string());
 
+                let (tx, rx) = if app.wire_rate_view {
+                    (s.wire_stats.tx_bytes, s.wire_stats.rx_bytes)
+                } else {
+                    (s.stats.tx_bytes, s.stats.rx_bytes)
+                };
                 Row::new(vec![
                     Cell::from(truncate(&s.cgroup_path, 30)),
                     Cell::from(truncate(&procs, 25)),
-                    Cell::from(format_rate(s.stats.tx_bytes)),
-                    Cell::from(format_rate(s.stats.rx_bytes)),
+                    Cell::from(format_rate(tx)),
+                    Cell::from(format_rate(rx)),
                     Cell::from(s.stats.drops.to_string()),
                     Cell::from(priority),
                     Cell::from(limit),
@@ -402,10 +429,11 @@ pub fn draw(f: &mut Frame, app: &App) {
             .collect()
     };
 
-    let title = if app.tree_view {
-        " shapeBPF - Bandwidth Monitor [Tree] "
-    } else {
-        " shapeBPF - Bandwidth Monitor "
+    let title = match (app.tree_view, app.wire_rate_view) {
+        (true, true) => " shapeBPF - Bandwidth Monitor [Tree] [Wire] ",
+        (true, false) => " shapeBPF - Bandwidth Monitor [Tree] ",
+        (false, true) => " shapeBPF - Bandwidth Monitor [Wire] ",
+        (false, false) => " shapeBPF - Bandwidth Monitor ",
     };
 
     let table = Table::new(
@@ -435,6 +463,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(" rules  "),
         Span::styled("t", Style::default().fg(Color::Green)),
         Span::raw(" tree  "),
+        Span::styled("w", Style::default().fg(Color::Green)),
+        Span::raw(" wire  "),
         Span::styled("Enter/l", Style::default().fg(Color::Green)),
         Span::raw(" actions  "),
         Span::styled("gg/G", Style::default().fg(Color::Green)),

@@ -37,6 +37,9 @@ struct traffic_stats {
 
 struct skb_node {
 	struct sk_buff __kptr *skb;
+	__u64 cgroup_id;
+	__u32 pid;
+	__u32 _pad;
 	struct bpf_list_node node;
 };
 
@@ -83,6 +86,20 @@ struct {
 	__type(key, __u32);   // pid
 	__type(value, struct traffic_stats);
 } PID_TRAFFIC_STATS SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 4096);
+	__type(key, __u64);   // cgroup_id
+	__type(value, struct traffic_stats);
+} WIRE_TRAFFIC_STATS SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_HASH);
+	__uint(max_entries, 8192);
+	__type(key, __u32);   // pid
+	__type(value, struct traffic_stats);
+} PID_WIRE_TRAFFIC_STATS SEC(".maps");
 
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -138,6 +155,41 @@ static __always_inline void update_pid_stats(__u32 len)
 		new_stats.tx_bytes = len;
 		new_stats.tx_packets = 1;
 		bpf_map_update_elem(&PID_TRAFFIC_STATS, &pid, &new_stats,
+				    BPF_NOEXIST);
+	}
+}
+
+static __always_inline void update_wire_stats(__u64 cgroup_id, __u32 len)
+{
+	struct traffic_stats *stats = bpf_map_lookup_elem(&WIRE_TRAFFIC_STATS,
+							  &cgroup_id);
+	if (stats) {
+		__sync_fetch_and_add(&stats->tx_bytes, len);
+		__sync_fetch_and_add(&stats->tx_packets, 1);
+	} else {
+		struct traffic_stats new_stats = {};
+		new_stats.tx_bytes = len;
+		new_stats.tx_packets = 1;
+		bpf_map_update_elem(&WIRE_TRAFFIC_STATS, &cgroup_id, &new_stats,
+				    BPF_NOEXIST);
+	}
+}
+
+static __always_inline void update_pid_wire_stats(__u32 pid, __u32 len)
+{
+	if (pid == 0)
+		return;
+
+	struct traffic_stats *stats = bpf_map_lookup_elem(&PID_WIRE_TRAFFIC_STATS,
+							  &pid);
+	if (stats) {
+		__sync_fetch_and_add(&stats->tx_bytes, len);
+		__sync_fetch_and_add(&stats->tx_packets, 1);
+	} else {
+		struct traffic_stats new_stats = {};
+		new_stats.tx_bytes = len;
+		new_stats.tx_packets = 1;
+		bpf_map_update_elem(&PID_WIRE_TRAFFIC_STATS, &pid, &new_stats,
 				    BPF_NOEXIST);
 	}
 }
@@ -212,6 +264,9 @@ int BPF_PROG(shapebpf_enqueue, struct sk_buff *skb, struct Qdisc *sch,
 	if (!skbn)
 		goto drop;
 
+	skbn->cgroup_id = cgroup_id;
+	skbn->pid = (__u32)(bpf_get_current_pid_tgid() >> 32);
+
 	sch->q.qlen++;
 	skb = bpf_kptr_xchg(&skbn->skb, skb);
 	if (skb)
@@ -251,6 +306,8 @@ struct sk_buff *BPF_PROG(shapebpf_dequeue, struct Qdisc *sch)
 		return NULL;
 
 	skbn = container_of(node, struct skb_node, node);
+	__u64 wire_cgroup_id = skbn->cgroup_id;
+	__u32 wire_pid = skbn->pid;
 	skb = bpf_kptr_xchg(&skbn->skb, skb);
 	bpf_obj_drop(skbn);
 	if (!skb)
@@ -266,6 +323,8 @@ struct sk_buff *BPF_PROG(shapebpf_dequeue, struct Qdisc *sch)
 		struct skb_node *new_skbn = bpf_obj_new(typeof(*new_skbn));
 
 		if (new_skbn) {
+			new_skbn->cgroup_id = wire_cgroup_id;
+			new_skbn->pid = wire_pid;
 			struct sk_buff *old = bpf_kptr_xchg(&new_skbn->skb,
 							    skb);
 			if (old)
@@ -284,6 +343,10 @@ struct sk_buff *BPF_PROG(shapebpf_dequeue, struct Qdisc *sch)
 		bpf_qdisc_watchdog_schedule(sch, tstamp, 0);
 		return NULL;
 	}
+
+	// Packet is actually departing — record wire-rate stats
+	update_wire_stats(wire_cgroup_id, qdisc_pkt_len(skb));
+	update_pid_wire_stats(wire_pid, qdisc_pkt_len(skb));
 
 	sch->qstats.backlog -= qdisc_pkt_len(skb);
 	bpf_qdisc_bstats_update(sch, skb);

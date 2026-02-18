@@ -144,6 +144,7 @@ pub mod ipc {
         pub cgroup_id: u64,
         pub cgroup_path: String,
         pub stats: super::TrafficStats,
+        pub wire_stats: super::TrafficStats,
         pub config: Option<super::RateConfig>,
         pub processes: Vec<ProcessInfo>,
         /// Name of the rule that matched this cgroup (if any)
@@ -163,6 +164,8 @@ pub mod ipc {
         pub cgroup_path: String,
         pub tx_bytes: u64,
         pub rx_bytes: u64,
+        pub wire_tx_bytes: u64,
+        pub wire_rx_bytes: u64,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
