@@ -293,7 +293,7 @@ impl App {
             should_quit: false,
             last_error: None,
             rule_form: None,
-            tree_view: false,
+            tree_view: true,
             wire_rate_view: false,
             collapsed_cgroups: HashSet::new(),
             tree_visible_count: 0,
@@ -337,8 +337,16 @@ impl App {
         }
     }
 
+    /// Collapse all tree nodes at depth >= 2 so tree view starts with two levels unfolded.
+    fn collapse_deep_nodes(&mut self) {
+        let deep = super::views::process_list::collect_deep_paths(&self.stats, 2);
+        self.collapsed_cgroups = deep;
+        self.update_tree_visible_count();
+    }
+
     pub async fn run(mut self, mut terminal: DefaultTerminal) -> Result<()> {
         self.refresh().await;
+        self.collapse_deep_nodes();
 
         loop {
             terminal.draw(|f| {
@@ -865,18 +873,31 @@ impl App {
             }
             MenuAction::CreateRule => {
                 if let Some(ref stats) = self.action_target_stats {
-                    let proc = stats.processes.first().cloned().unwrap_or(ProcessInfo {
-                        pid: 0,
-                        uid: 0,
-                        comm: String::new(),
-                        cgroup_id: stats.cgroup_id,
-                        cgroup_path: stats.cgroup_path.clone(),
-                        tx_bytes: 0,
-                        rx_bytes: 0,
-                        wire_tx_bytes: 0,
-                        wire_rx_bytes: 0,
+                    let procs_str = stats.processes.iter()
+                        .map(|p| p.comm.as_str())
+                        .filter(|c| !c.is_empty())
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    let uid_str = stats.processes.first()
+                        .map(|p| p.uid.to_string())
+                        .unwrap_or_default();
+                    self.rule_form = Some(RuleForm {
+                        name: stats.cgroup_path.split('/').last()
+                            .unwrap_or("unknown").to_string(),
+                        match_type: MatchType::CgroupPath,
+                        match_value: stats.cgroup_path.clone(),
+                        egress: "0".to_string(),
+                        ingress: "0".to_string(),
+                        priority: "5".to_string(),
+                        focused_field: 0,
+                        cgroup_value: stats.cgroup_path.clone(),
+                        process_value: procs_str,
+                        user_value: uid_str,
+                        field_pristine: [false, false, false, true, true, true],
+                        pending_isolate_pid: None,
                     });
-                    self.rule_form = Some(RuleForm::from_process(&proc));
                     self.mode = AppMode::CreateRule;
                 }
             }
@@ -1050,7 +1071,7 @@ impl App {
                     match self.client.request(&Request::UpsertRule { rule }).await {
                         Ok(Response::Ok) => {
                             self.rule_form = None;
-                            self.mode = AppMode::BatchReview;
+                            self.mode = AppMode::ProcessList;
                             self.selected_index = 0;
                             self.refresh().await;
                         }

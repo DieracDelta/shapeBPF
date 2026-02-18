@@ -187,6 +187,9 @@
           default = mkShapebpf {
             pname = "shapebpf";
             rustToolchain = rustNightly;
+            env = {
+              GIT_HASH = self.shortRev or self.dirtyShortRev or "dev";
+            };
           };
         }
       );

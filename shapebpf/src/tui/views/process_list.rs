@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, Paragraph, Row, Table};
@@ -9,7 +9,6 @@ use ratatui::Frame;
 use shapebpf_common::ipc::CgroupStats;
 
 use crate::tui::app::App;
-use crate::tui::widgets::notification;
 
 // ── Tree data structures ────────────────────────────────────────────
 
@@ -125,14 +124,9 @@ fn flatten_node(
     stats: &[CgroupStats],
     rows: &mut Vec<CgroupTreeRow>,
 ) {
-    let is_leaf = node.children.is_empty() && node.stat_index.is_some();
-    let process_count = if is_leaf {
-        node.stat_index
-            .map(|idx| stats[idx].processes.len())
-            .unwrap_or(0)
-    } else {
-        0
-    };
+    let process_count = node.stat_index
+        .map(|idx| stats[idx].processes.len())
+        .unwrap_or(0);
     let has_children = !node.children.is_empty() || process_count > 0;
     let is_collapsed = collapsed.contains(&node.full_path);
 
@@ -213,7 +207,7 @@ fn flatten_node(
         };
 
     // Clear inline processes when sub-rows will be shown
-    let processes = if is_leaf && process_count > 0 && !is_collapsed {
+    let processes = if process_count > 0 && !is_collapsed {
         String::new()
     } else {
         processes
@@ -243,8 +237,9 @@ fn flatten_node(
 
     // Emit cgroup tree children
     let child_count = node.children.len();
+    let has_proc_subrows = process_count > 0;
     for (i, child) in node.children.values().enumerate() {
-        let child_is_last = i == child_count - 1;
+        let child_is_last = i == child_count - 1 && !has_proc_subrows;
         let child_indent = if depth == 0 {
             String::new()
         } else if is_last {
@@ -263,8 +258,8 @@ fn flatten_node(
         );
     }
 
-    // Emit process sub-rows for leaf cgroups with processes
-    if is_leaf && process_count > 0 {
+    // Emit process sub-rows for cgroups with processes
+    if process_count > 0 {
         let idx = node.stat_index.unwrap();
         let procs = &stats[idx].processes;
         let proc_indent = if depth == 0 {
@@ -303,18 +298,61 @@ fn flatten_node(
     }
 }
 
+/// Collect full_paths of all tree nodes with children at depth >= `min_depth`.
+/// Depth 0 = root children (e.g. `system.slice`), depth 1 = their children, etc.
+pub fn collect_deep_paths(stats: &[CgroupStats], min_depth: usize) -> HashSet<String> {
+    let mut root_children: BTreeMap<String, TreeNode> = BTreeMap::new();
+
+    for (idx, stat) in stats.iter().enumerate() {
+        let path = stat.cgroup_path.trim_start_matches('/');
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        if segments.is_empty() {
+            continue;
+        }
+        let mut current = &mut root_children;
+        let mut built_path = String::new();
+        for (i, &seg) in segments.iter().enumerate() {
+            built_path = if built_path.is_empty() {
+                format!("/{seg}")
+            } else {
+                format!("{built_path}/{seg}")
+            };
+            let node = current
+                .entry(seg.to_string())
+                .or_insert_with(|| TreeNode {
+                    segment: seg.to_string(),
+                    full_path: built_path.clone(),
+                    children: BTreeMap::new(),
+                    stat_index: None,
+                });
+            if i == segments.len() - 1 {
+                node.stat_index = Some(idx);
+            }
+            current = &mut node.children;
+        }
+    }
+
+    let mut result = HashSet::new();
+    fn walk(children: &BTreeMap<String, TreeNode>, depth: usize, min_depth: usize, out: &mut HashSet<String>) {
+        for node in children.values() {
+            if depth >= min_depth && !node.children.is_empty() {
+                out.insert(node.full_path.clone());
+            }
+            walk(&node.children, depth + 1, min_depth, out);
+        }
+    }
+    walk(&root_children, 0, min_depth, &mut result);
+    result
+}
+
 // ── Drawing ─────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::vertical([
-        Constraint::Length(3), // notification bar
-        Constraint::Min(10),  // main table
+        Constraint::Min(10),   // main table
         Constraint::Length(1), // status bar
     ])
     .split(f.area());
-
-    // Notification bar
-    notification::draw_notification(f, chunks[0], app.unclassified.len());
 
     // Main bandwidth table
     let (tx_label, rx_label) = if app.wire_rate_view {
@@ -451,7 +489,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     .header(header)
     .block(Block::default().borders(Borders::ALL).title(title));
 
-    f.render_widget(table, chunks[1]);
+    f.render_widget(table, chunks[0]);
 
     // Status bar
     let mut hints = vec![
@@ -480,7 +518,22 @@ pub fn draw(f: &mut Frame, app: &App) {
         hints.push(Span::raw(" folds"));
     }
     let status = Line::from(hints);
-    f.render_widget(Paragraph::new(status), chunks[2]);
+    f.render_widget(Paragraph::new(status), chunks[1]);
+
+    // Git hash in bottom-right
+    let hash = env!("GIT_HASH");
+    if !hash.is_empty() {
+        let label = format!("{hash} ");
+        let w = label.len() as u16;
+        let bar = chunks[1];
+        if bar.width > w {
+            let version_area = Rect::new(bar.x + bar.width - w, bar.y, w, 1);
+            let version = Paragraph::new(label)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Right);
+            f.render_widget(version, version_area);
+        }
+    }
 }
 
 fn format_rate(bytes_per_sec: u64) -> String {
