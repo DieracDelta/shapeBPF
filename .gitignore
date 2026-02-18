@@ -1,0 +1,7 @@
+/target
+shapebpf-ebpf/target
+shapebpf-ebpf/src/bpf/vmlinux.h
+result
+*.swp
+*.swo
+.direnv

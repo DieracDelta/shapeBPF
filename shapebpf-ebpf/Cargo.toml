@@ -1,0 +1,19 @@
+[package]
+name = "shapebpf-ebpf"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+arch-x86_64 = []
+arch-aarch64 = []
+
+[dependencies]
+aya-ebpf = { git = "https://github.com/aya-rs/aya", branch = "main" }
+shapebpf-common = { path = "../shapebpf-common", default-features = false }
+
+[profile.release]
+debug = 2
+
+[[bin]]
+name = "shapebpf-ebpf"
+path = "src/main.rs"

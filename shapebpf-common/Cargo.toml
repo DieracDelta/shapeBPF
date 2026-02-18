@@ -1,0 +1,13 @@
+[package]
+name = "shapebpf-common"
+version = "0.1.0"
+edition = "2024"
+
+[features]
+default = ["userspace"]
+userspace = ["aya", "serde", "bincode"]
+
+[dependencies]
+aya = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+bincode = { workspace = true, optional = true }
