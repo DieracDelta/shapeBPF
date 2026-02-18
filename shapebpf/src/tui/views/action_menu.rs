@@ -50,7 +50,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     }
 
     let status = Line::from(vec![
-        Span::styled(" j/k", Style::default().fg(Color::Green)),
+        Span::styled(" j/k/C-n/C-j", Style::default().fg(Color::Green)),
         Span::raw(" navigate  "),
         Span::styled("Enter/l", Style::default().fg(Color::Green)),
         Span::raw(" select  "),

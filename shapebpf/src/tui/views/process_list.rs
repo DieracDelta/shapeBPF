@@ -492,7 +492,15 @@ pub fn draw(f: &mut Frame, app: &App) {
     f.render_widget(table, chunks[0]);
 
     // Status bar
-    let mut hints = vec![
+    let mut hints: Vec<Span> = Vec::new();
+    if let Some(ref msg) = app.status_message {
+        hints.push(Span::styled(
+            format!(" {msg}  "),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        ));
+        hints.push(Span::raw("| "));
+    }
+    hints.extend([
         Span::styled(" q", Style::default().fg(Color::Green)),
         Span::raw(" quit  "),
         Span::styled("r", Style::default().fg(Color::Green)),
@@ -509,7 +517,7 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(" top/bottom  "),
         Span::styled("C-d/u", Style::default().fg(Color::Green)),
         Span::raw(" page"),
-    ];
+    ]);
     if app.tree_view {
         hints.push(Span::raw("  "));
         hints.push(Span::styled("h/l", Style::default().fg(Color::Green)));

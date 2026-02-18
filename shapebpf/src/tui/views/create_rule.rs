@@ -77,7 +77,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let status = Line::from(vec![
         Span::styled(" Esc", Style::default().fg(Color::Green)),
         Span::raw(" cancel  "),
-        Span::styled("Tab", Style::default().fg(Color::Green)),
+        Span::styled("Tab/C-n/C-j", Style::default().fg(Color::Green)),
         Span::raw(" next field  "),
         Span::styled("Enter", Style::default().fg(Color::Green)),
         Span::raw(" save  "),

@@ -277,6 +277,8 @@ pub struct App {
     pub action_target_stats: Option<CgroupStats>,
     /// The specific PID targeted (for process sub-rows in tree view)
     pub action_target_pid: Option<u32>,
+    /// Transient status message shown in ProcessList after rule creation
+    pub status_message: Option<String>,
 }
 
 impl App {
@@ -302,6 +304,7 @@ impl App {
             action_menu_index: 0,
             action_target_stats: None,
             action_target_pid: None,
+            status_message: None,
         }
     }
 
@@ -326,6 +329,7 @@ impl App {
             Err(e) => self.last_error = Some(format!("{e:#}")),
             _ => {}
         }
+        self.status_message = None;
         self.update_tree_visible_count();
     }
 
@@ -484,7 +488,7 @@ impl App {
         let modifiers = key.modifiers;
 
         if self.mode == AppMode::CreateRule {
-            self.handle_form_key(code).await;
+            self.handle_form_key(key).await;
             return;
         }
 
@@ -529,11 +533,17 @@ impl App {
 
         // ActionMenu: fully self-contained key handling
         if self.mode == AppMode::ActionMenu {
+            let is_ctrl = modifiers.contains(KeyModifiers::CONTROL);
             match code {
                 KeyCode::Up | KeyCode::Char('k') => {
                     self.action_menu_index = self.action_menu_index.saturating_sub(1);
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
+                    if self.action_menu_index + 1 < self.action_menu_items.len() {
+                        self.action_menu_index += 1;
+                    }
+                }
+                KeyCode::Char('n') if is_ctrl => {
                     if self.action_menu_index + 1 < self.action_menu_items.len() {
                         self.action_menu_index += 1;
                     }
@@ -969,7 +979,10 @@ impl App {
         }
     }
 
-    async fn handle_form_key(&mut self, key: KeyCode) {
+    async fn handle_form_key(&mut self, event: KeyEvent) {
+        let code = event.code;
+        let is_ctrl = event.modifiers.contains(KeyModifiers::CONTROL);
+
         let form = match self.rule_form.as_mut() {
             Some(f) => f,
             None => {
@@ -978,10 +991,17 @@ impl App {
             }
         };
 
-        match key {
+        // Ctrl+n / Ctrl+j act as next-field
+        let is_ctrl_next = is_ctrl && matches!(code, KeyCode::Char('n') | KeyCode::Char('j'));
+
+        match code {
             KeyCode::Esc => {
                 self.rule_form = None;
-                self.mode = AppMode::BatchReview;
+                self.mode = AppMode::ProcessList;
+                self.selected_index = 0;
+            }
+            _ if is_ctrl_next => {
+                form.focused_field = (form.focused_field + 1) % RuleForm::field_count();
             }
             KeyCode::Tab | KeyCode::Down => {
                 form.focused_field = (form.focused_field + 1) % RuleForm::field_count();
@@ -1067,6 +1087,7 @@ impl App {
                 }
 
                 let form = self.rule_form.as_ref().unwrap();
+                let rule_name_for_msg = form.name.clone();
                 if let Some(rule) = form.to_rule() {
                     match self.client.request(&Request::UpsertRule { rule }).await {
                         Ok(Response::Ok) => {
@@ -1074,6 +1095,10 @@ impl App {
                             self.mode = AppMode::ProcessList;
                             self.selected_index = 0;
                             self.refresh().await;
+                            self.status_message = Some(format!(
+                                "Rule '{}' created \u{2014} applying...",
+                                rule_name_for_msg
+                            ));
                         }
                         Ok(Response::Error(e)) => self.last_error = Some(e),
                         Err(e) => self.last_error = Some(format!("{e:#}")),
