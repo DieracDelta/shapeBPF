@@ -82,6 +82,40 @@ unsafe fn try_sched_process_exec() -> Result<i32, i64> {
     Ok(0)
 }
 
+/// Captures fork events so fork-without-exec children (e.g. sshd privilege separation)
+/// inherit the parent's cgroup mapping immediately.
+#[tracepoint(category = "sched", name = "sched_process_fork")]
+pub fn sched_process_fork(ctx: TracePointContext) -> i32 {
+    unsafe { try_sched_process_fork(ctx).unwrap_or(0) }
+}
+
+unsafe fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i64> {
+    // child_pid is at offset 20 in sched_process_fork tracepoint args
+    let child_pid: i32 = ctx.read_at(20).map_err(|_| -1i64)?;
+    let child_pid = child_pid as u32;
+
+    let uid_gid = bpf_get_current_uid_gid();
+    let uid = uid_gid as u32;
+
+    let task = aya_ebpf::helpers::bpf_get_current_task() as *const u8;
+    if task.is_null() {
+        return Ok(0);
+    }
+
+    let comm: [u8; 16] = bpf_get_current_comm().unwrap_or([0u8; 16]);
+    let cgroup_id = read_cgroup_id(task).unwrap_or(0);
+
+    let event = ProcessEvent {
+        pid: child_pid,
+        uid,
+        cgroup_id,
+        comm,
+    };
+
+    PID_CGROUP_MAP.insert(&child_pid, &event, 0).map_err(|_| -1i64)?;
+    Ok(0)
+}
+
 /// Cleans up process entry on exit.
 #[tracepoint(category = "sched", name = "sched_process_exit")]
 pub fn sched_process_exit(_ctx: TracePointContext) -> i32 {

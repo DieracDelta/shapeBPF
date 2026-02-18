@@ -179,9 +179,9 @@ int BPF_PROG(shapebpf_enqueue, struct sk_buff *skb, struct Qdisc *sch,
 	// Apply EDT pacing (per-cgroup if configured, else default)
 	struct rate_config *cfg = lookup_rate_config(cgroup_id);
 	if (cfg && cfg->egress_rate_bps > 0) {
-		__u64 rate_bps = cfg->egress_rate_bps;
-		// delay_ns = (bytes * 8 * 1e9) / rate_bps
-		__u64 delay_ns = ((__u64)pkt_len * 8000000000ULL) / rate_bps;
+		__u64 rate_Bps = cfg->egress_rate_bps;
+		// delay_ns = bytes * 1e9 / rate_Bps  (rate is in bytes/sec)
+		__u64 delay_ns = ((__u64)pkt_len * 1000000000ULL) / rate_Bps;
 		__u64 now = bpf_ktime_get_ns();
 
 		// Use cgroup_id as EDT key for per-cgroup pacing

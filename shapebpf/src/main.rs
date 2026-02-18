@@ -242,6 +242,69 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 s.update_processes(procs);
                 s.set_unclassified(unclassified);
             }
+            drop(loader);
+
+            // Resolve cgroup paths for traffic entries without known paths
+            {
+                let s = stats_clone2.lock().await;
+                let unknown_ids: Vec<u64> = s.traffic_cgroup_ids_without_paths();
+                drop(s);
+
+                for cgroup_id in unknown_ids {
+                    if let Some(path) = Discovery::resolve_cgroup_path(cgroup_id) {
+                        let mut s = stats_clone2.lock().await;
+                        s.update_cgroup_path(cgroup_id, format!("/{path}"));
+                    }
+                }
+            }
+
+            // Cgroup-level rule matching: apply rules to cgroups by path
+            // (catches cgroups whose processes aren't in PID_CGROUP_MAP,
+            // e.g. services started before BPF loaded)
+            {
+                let s = stats_clone2.lock().await;
+                let cgroup_paths = s.all_cgroup_paths();
+                drop(s);
+
+                let rules = rules_clone.lock().await;
+                let mut cgroup_rule_configs = Vec::new();
+                let mut cgroup_rule_assignments = Vec::new();
+
+                for (cgroup_id, cgroup_path) in &cgroup_paths {
+                    let service_unit = Discovery::service_unit_from_cgroup(cgroup_path);
+                    let container_id = Discovery::container_id_from_cgroup(cgroup_path);
+                    let container_name = container_id
+                        .as_deref()
+                        .and_then(|id| discovery.container_name(id));
+
+                    if let Some(rule) = rules.match_cgroup(
+                        cgroup_path,
+                        container_name,
+                        service_unit.as_deref(),
+                    ) {
+                        let config = RuleEngine::rule_to_rate_config(rule);
+                        cgroup_rule_assignments.push((*cgroup_id, rule.name.clone()));
+                        cgroup_rule_configs.push((*cgroup_id, config));
+                    }
+                }
+                drop(rules);
+
+                let mut loader = loader_clone2.lock().await;
+                for &(cgroup_id, config) in &cgroup_rule_configs {
+                    if let Err(e) = loader.set_cgroup_limit(cgroup_id, config) {
+                        log::debug!("set_cgroup_limit for cgroup match: {e:#}");
+                    }
+                }
+                drop(loader);
+
+                let mut s = stats_clone2.lock().await;
+                for &(cgroup_id, config) in &cgroup_rule_configs {
+                    s.update_config(cgroup_id, config);
+                }
+                for (cgroup_id, rule_name) in cgroup_rule_assignments {
+                    s.set_rule_assignment(cgroup_id, rule_name);
+                }
+            }
         }
     });
 

@@ -5,10 +5,15 @@ use shapebpf_common::{RateConfig, TrafficStats};
 
 /// Collects and caches traffic statistics from BPF maps.
 pub struct StatsCollector {
-    /// cgroup_id -> latest traffic stats
+    /// cgroup_id -> per-second rate (computed from deltas)
     traffic: HashMap<u64, TrafficStats>,
-    /// pid -> latest per-process traffic stats
+    /// pid -> per-second rate (computed from deltas)
     pid_traffic: HashMap<u32, TrafficStats>,
+    /// Previous cumulative counters for delta computation
+    prev_traffic: HashMap<u64, TrafficStats>,
+    prev_pid_traffic: HashMap<u32, TrafficStats>,
+    last_traffic_update: Option<std::time::Instant>,
+    last_pid_traffic_update: Option<std::time::Instant>,
     /// cgroup_id -> rate config (if any)
     configs: HashMap<u64, RateConfig>,
     /// cgroup_id -> cgroup path
@@ -28,6 +33,10 @@ impl StatsCollector {
         Self {
             traffic: HashMap::new(),
             pid_traffic: HashMap::new(),
+            prev_traffic: HashMap::new(),
+            prev_pid_traffic: HashMap::new(),
+            last_traffic_update: None,
+            last_pid_traffic_update: None,
             configs: HashMap::new(),
             cgroup_paths: HashMap::new(),
             processes: HashMap::new(),
@@ -38,17 +47,86 @@ impl StatsCollector {
     }
 
     pub fn update_traffic(&mut self, stats: Vec<(u64, TrafficStats)>) {
+        let now = std::time::Instant::now();
+        let elapsed_secs = self
+            .last_traffic_update
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(1.0)
+            .max(0.001); // avoid division by zero
+
         self.traffic.clear();
-        for (cgroup_id, s) in stats {
-            self.traffic.insert(cgroup_id, s);
+        for &(cgroup_id, ref cumulative) in &stats {
+            let rate = if let Some(prev) = self.prev_traffic.get(&cgroup_id) {
+                TrafficStats {
+                    tx_bytes: (cumulative.tx_bytes.saturating_sub(prev.tx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    rx_bytes: (cumulative.rx_bytes.saturating_sub(prev.rx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    tx_packets: (cumulative.tx_packets.saturating_sub(prev.tx_packets) as f64
+                        / elapsed_secs) as u64,
+                    rx_packets: (cumulative.rx_packets.saturating_sub(prev.rx_packets) as f64
+                        / elapsed_secs) as u64,
+                    drops: cumulative.drops,
+                }
+            } else {
+                // First sample: no previous data, show zero rate
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: cumulative.drops,
+                }
+            };
+            self.traffic.insert(cgroup_id, rate);
         }
+
+        self.prev_traffic.clear();
+        for (cgroup_id, cumulative) in stats {
+            self.prev_traffic.insert(cgroup_id, cumulative);
+        }
+        self.last_traffic_update = Some(now);
     }
 
     pub fn update_pid_traffic(&mut self, stats: Vec<(u32, TrafficStats)>) {
+        let now = std::time::Instant::now();
+        let elapsed_secs = self
+            .last_pid_traffic_update
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(1.0)
+            .max(0.001);
+
         self.pid_traffic.clear();
-        for (pid, s) in stats {
-            self.pid_traffic.insert(pid, s);
+        for &(pid, ref cumulative) in &stats {
+            let rate = if let Some(prev) = self.prev_pid_traffic.get(&pid) {
+                TrafficStats {
+                    tx_bytes: (cumulative.tx_bytes.saturating_sub(prev.tx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    rx_bytes: (cumulative.rx_bytes.saturating_sub(prev.rx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    tx_packets: (cumulative.tx_packets.saturating_sub(prev.tx_packets) as f64
+                        / elapsed_secs) as u64,
+                    rx_packets: (cumulative.rx_packets.saturating_sub(prev.rx_packets) as f64
+                        / elapsed_secs) as u64,
+                    drops: cumulative.drops,
+                }
+            } else {
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: cumulative.drops,
+                }
+            };
+            self.pid_traffic.insert(pid, rate);
         }
+
+        self.prev_pid_traffic.clear();
+        for (pid, cumulative) in stats {
+            self.prev_pid_traffic.insert(pid, cumulative);
+        }
+        self.last_pid_traffic_update = Some(now);
     }
 
     pub fn update_processes(&mut self, procs: Vec<ProcessInfo>) {
@@ -83,6 +161,21 @@ impl StatsCollector {
 
     pub fn untrack_created_cgroup(&mut self, cgroup_path: &str) {
         self.created_cgroups.remove(cgroup_path);
+    }
+
+    pub fn all_cgroup_paths(&self) -> Vec<(u64, String)> {
+        self.cgroup_paths
+            .iter()
+            .map(|(&id, path)| (id, path.clone()))
+            .collect()
+    }
+
+    pub fn traffic_cgroup_ids_without_paths(&self) -> Vec<u64> {
+        self.traffic
+            .keys()
+            .filter(|id| !self.cgroup_paths.contains_key(id))
+            .copied()
+            .collect()
     }
 
     pub fn get_cgroup_stats(&self) -> Vec<CgroupStats> {

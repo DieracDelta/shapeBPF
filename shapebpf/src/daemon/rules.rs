@@ -80,6 +80,26 @@ impl RuleEngine {
         })
     }
 
+    /// Find the matching rule for a cgroup by path-level criteria only.
+    /// Skips ProcessName and User which require per-process info.
+    pub fn match_cgroup(
+        &self,
+        cgroup_path: &str,
+        container_name: Option<&str>,
+        service_unit: Option<&str>,
+    ) -> Option<&Rule> {
+        self.rules.iter().find(|rule| match &rule.match_criteria {
+            MatchCriteria::ContainerName(name) => {
+                container_name.is_some_and(|cn| cn == name.as_str())
+            }
+            MatchCriteria::ServiceUnit(unit) => {
+                service_unit.is_some_and(|su| su == unit.as_str())
+            }
+            MatchCriteria::CgroupPath(pattern) => cgroup_path.contains(pattern.as_str()),
+            _ => false,
+        })
+    }
+
     /// Convert a matched rule to a RateConfig for the BPF map.
     pub fn rule_to_rate_config(rule: &Rule) -> RateConfig {
         RateConfig {

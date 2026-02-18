@@ -49,6 +49,16 @@ impl EbpfLoader {
             .attach("sched", "sched_process_exec")
             .context("attaching sched_process_exec")?;
 
+        let fork_prog: &mut TracePoint = bpf
+            .program_mut("sched_process_fork")
+            .context("sched_process_fork program not found")?
+            .try_into()
+            .context("not a TracePoint")?;
+        fork_prog.load().context("loading sched_process_fork")?;
+        fork_prog
+            .attach("sched", "sched_process_fork")
+            .context("attaching sched_process_fork")?;
+
         let exit_prog: &mut TracePoint = bpf
             .program_mut("sched_process_exit")
             .context("sched_process_exit program not found")?
