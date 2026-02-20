@@ -22,6 +22,8 @@ pub enum AppMode {
     CreateRule,
     CgroupInfo,
     ActionMenu,
+    Search,
+    Filter,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +282,20 @@ pub struct App {
     pub action_target_pid: Option<u32>,
     /// Transient status message shown in ProcessList after rule creation
     pub status_message: Option<String>,
+    /// Scroll offset for the main selected_index views (ProcessList, BatchReview, RuleEditor)
+    pub scroll_offset: usize,
+    /// Scroll offset for batch_pid_index (BatchReviewPids)
+    pub batch_scroll_offset: usize,
+    /// Number of visible rows in the current table viewport
+    pub visible_rows: usize,
+    /// Live input being typed in Search/Filter mode
+    pub search_query: String,
+    /// Committed filter string applied to process list
+    pub active_filter: String,
+    /// Indices into stats (flat) or tree rows that match the current search
+    pub search_match_indices: Vec<usize>,
+    /// Current position within search_match_indices (for n/N navigation)
+    pub search_match_pos: usize,
 }
 
 impl App {
@@ -306,6 +322,13 @@ impl App {
             action_target_stats: None,
             action_target_pid: None,
             status_message: None,
+            scroll_offset: 0,
+            batch_scroll_offset: 0,
+            visible_rows: 0,
+            search_query: String::new(),
+            active_filter: String::new(),
+            search_match_indices: Vec::new(),
+            search_match_pos: 0,
         }
     }
 
@@ -336,9 +359,94 @@ impl App {
 
     fn update_tree_visible_count(&mut self) {
         if self.tree_view {
+            let filtered_stats: Vec<CgroupStats> = if self.active_filter.is_empty() {
+                self.stats.clone()
+            } else {
+                self.stats
+                    .iter()
+                    .filter(|s| Self::matches_query(s, &self.active_filter))
+                    .cloned()
+                    .collect()
+            };
             self.tree_visible_count =
-                super::views::process_list::build_cgroup_tree(&self.stats, &self.collapsed_cgroups)
-                    .len();
+                super::views::process_list::build_cgroup_tree(
+                    &filtered_stats,
+                    &self.collapsed_cgroups,
+                )
+                .len();
+        }
+    }
+
+    /// Check if a CgroupStats matches the given query (case-insensitive).
+    pub fn matches_query(stat: &CgroupStats, query: &str) -> bool {
+        if query.is_empty() {
+            return true;
+        }
+        let q = query.to_lowercase();
+        stat.cgroup_path.to_lowercase().contains(&q)
+            || stat
+                .processes
+                .iter()
+                .any(|p| p.comm.to_lowercase().contains(&q))
+    }
+
+    fn update_search_matches(&mut self) {
+        self.search_match_indices.clear();
+        if self.search_query.is_empty() {
+            return;
+        }
+        if self.tree_view {
+            let filtered_stats: Vec<CgroupStats> = if self.active_filter.is_empty() {
+                self.stats.clone()
+            } else {
+                self.stats
+                    .iter()
+                    .filter(|s| Self::matches_query(s, &self.active_filter))
+                    .cloned()
+                    .collect()
+            };
+            let rows = super::views::process_list::build_cgroup_tree(
+                &filtered_stats,
+                &self.collapsed_cgroups,
+            );
+            let q = self.search_query.to_lowercase();
+            for (i, row) in rows.iter().enumerate() {
+                let matches = row.full_path.to_lowercase().contains(&q)
+                    || row.processes.to_lowercase().contains(&q)
+                    || row.label.to_lowercase().contains(&q);
+                if matches {
+                    self.search_match_indices.push(i);
+                }
+            }
+        } else if self.active_filter.is_empty() {
+            for (i, stat) in self.stats.iter().enumerate() {
+                if Self::matches_query(stat, &self.search_query) {
+                    self.search_match_indices.push(i);
+                }
+            }
+        } else {
+            // Search within already-filtered rows
+            let mut visible_idx = 0;
+            for stat in &self.stats {
+                if Self::matches_query(stat, &self.active_filter) {
+                    if Self::matches_query(stat, &self.search_query) {
+                        self.search_match_indices.push(visible_idx);
+                    }
+                    visible_idx += 1;
+                }
+            }
+        }
+        self.search_match_pos = 0;
+    }
+
+    fn filtered_stats_len(&self) -> usize {
+        if self.active_filter.is_empty() {
+            self.stats.len()
+        } else {
+            self.stats
+                .iter()
+                .filter(|s| Self::matches_query(s, &self.active_filter))
+                .count()
         }
     }
 
@@ -354,9 +462,12 @@ impl App {
         self.collapse_deep_nodes();
 
         loop {
+            self.update_visible_rows();
             terminal.draw(|f| {
                 match self.mode {
-                    AppMode::ProcessList => views::process_list::draw(f, &self),
+                    AppMode::ProcessList | AppMode::Search | AppMode::Filter => {
+                        views::process_list::draw(f, &self)
+                    }
                     AppMode::BatchReview => views::batch_review::draw(f, &self),
                     AppMode::BatchReviewPids => views::batch_review_pids::draw(f, &self),
                     AppMode::RuleEditor => views::rule_editor::draw(f, &self),
@@ -383,6 +494,8 @@ impl App {
                     && self.mode != AppMode::CgroupInfo
                     && self.mode != AppMode::BatchReviewPids
                     && self.mode != AppMode::ActionMenu
+                    && self.mode != AppMode::Search
+                    && self.mode != AppMode::Filter
                 {
                     self.refresh().await;
                 }
@@ -395,8 +508,10 @@ impl App {
     /// Number of items in the current list view.
     fn list_len(&self) -> usize {
         match self.mode {
-            AppMode::ProcessList if self.tree_view => self.tree_visible_count,
-            AppMode::ProcessList => self.stats.len(),
+            AppMode::ProcessList | AppMode::Search | AppMode::Filter if self.tree_view => {
+                self.tree_visible_count
+            }
+            AppMode::ProcessList | AppMode::Search | AppMode::Filter => self.filtered_stats_len(),
             AppMode::BatchReview => self.unclassified_grouped.len(),
             AppMode::RuleEditor => self.rules.len(),
             AppMode::ActionMenu => self.action_menu_items.len(),
@@ -409,6 +524,39 @@ impl App {
         crossterm::terminal::size()
             .map(|(_, h)| (h as usize).saturating_sub(6) / 2)
             .unwrap_or(10)
+    }
+
+    fn adjust_scroll(&mut self) {
+        if self.visible_rows == 0 {
+            return;
+        }
+        if self.selected_index < self.scroll_offset {
+            self.scroll_offset = self.selected_index;
+        }
+        if self.selected_index >= self.scroll_offset + self.visible_rows {
+            self.scroll_offset = self.selected_index - self.visible_rows + 1;
+        }
+    }
+
+    fn adjust_batch_scroll(&mut self) {
+        if self.visible_rows == 0 {
+            return;
+        }
+        if self.batch_pid_index < self.batch_scroll_offset {
+            self.batch_scroll_offset = self.batch_pid_index;
+        }
+        if self.batch_pid_index >= self.batch_scroll_offset + self.visible_rows {
+            self.batch_scroll_offset = self.batch_pid_index - self.visible_rows + 1;
+        }
+    }
+
+    /// Update visible_rows from terminal size (called once per frame before draw).
+    pub fn update_visible_rows(&mut self) {
+        // Table height = terminal height - borders(2) - header(1) - status bar(1) - title bar (varies)
+        // Use a conservative estimate: subtract 4 for borders + header + status bar
+        self.visible_rows = crossterm::terminal::size()
+            .map(|(_, h)| (h as usize).saturating_sub(4))
+            .unwrap_or(20);
     }
 
     fn toggle_tree_node(&mut self) {
@@ -428,6 +576,7 @@ impl App {
         if self.selected_index >= self.tree_visible_count && self.tree_visible_count > 0 {
             self.selected_index = self.tree_visible_count - 1;
         }
+        self.adjust_scroll();
     }
 
     fn handle_fold_key(&mut self, c: char) {
@@ -482,6 +631,7 @@ impl App {
         if self.tree_visible_count > 0 && self.selected_index >= self.tree_visible_count {
             self.selected_index = self.tree_visible_count - 1;
         }
+        self.adjust_scroll();
     }
 
     async fn handle_key(&mut self, key: KeyEvent) {
@@ -493,6 +643,11 @@ impl App {
             return;
         }
 
+        if self.mode == AppMode::Search || self.mode == AppMode::Filter {
+            self.handle_search_key(key);
+            return;
+        }
+
         // Handle pending two-key sequences
         if let Some(pending) = self.pending_key.take() {
             match pending {
@@ -500,6 +655,7 @@ impl App {
                     if code == KeyCode::Char('g') {
                         // gg: go to first item
                         self.selected_index = 0;
+                        self.scroll_offset = 0;
                         return;
                     }
                     // Not 'g' — fall through to normal handling
@@ -568,11 +724,13 @@ impl App {
                     let jump = self.half_page_size();
                     let max = self.list_len();
                     self.selected_index = (self.selected_index + jump).min(max.saturating_sub(1));
+                    self.adjust_scroll();
                     return;
                 }
                 KeyCode::Char('u') => {
                     let jump = self.half_page_size();
                     self.selected_index = self.selected_index.saturating_sub(jump);
+                    self.adjust_scroll();
                     return;
                 }
                 _ => {}
@@ -587,14 +745,17 @@ impl App {
                     && self.mode != AppMode::ActionMenu =>
             {
                 self.selected_index = 0;
+                self.scroll_offset = 0;
                 self.mode = AppMode::BatchReview;
             }
             KeyCode::Char('e')
                 if self.mode != AppMode::CgroupInfo
                     && self.mode != AppMode::BatchReviewPids
-                    && self.mode != AppMode::ActionMenu =>
+                    && self.mode != AppMode::ActionMenu
+                    && self.mode != AppMode::RuleEditor =>
             {
                 self.selected_index = 0;
+                self.scroll_offset = 0;
                 self.mode = AppMode::RuleEditor;
             }
             KeyCode::Esc | KeyCode::Char('h') => match self.mode {
@@ -603,7 +764,21 @@ impl App {
                 }
                 AppMode::BatchReview | AppMode::RuleEditor | AppMode::Detail => {
                     self.selected_index = 0;
+                    self.scroll_offset = 0;
                     self.mode = AppMode::ProcessList;
+                }
+                AppMode::ProcessList
+                    if code == KeyCode::Esc
+                        && (!self.active_filter.is_empty()
+                            || !self.search_match_indices.is_empty()) =>
+                {
+                    self.active_filter.clear();
+                    self.search_query.clear();
+                    self.search_match_indices.clear();
+                    self.search_match_pos = 0;
+                    self.selected_index = 0;
+                    self.scroll_offset = 0;
+                    self.update_tree_visible_count();
                 }
                 AppMode::ProcessList if code == KeyCode::Char('h') && self.tree_view => {
                     // h in tree view: collapse current node
@@ -615,11 +790,13 @@ impl App {
                         if row.has_children && !row.collapsed {
                             self.collapsed_cgroups.insert(row.full_path.clone());
                             self.update_tree_visible_count();
+                            self.adjust_scroll();
                         }
                     }
                 }
                 _ => {
                     self.selected_index = 0;
+                    self.scroll_offset = 0;
                     self.mode = AppMode::ProcessList;
                 }
             },
@@ -631,15 +808,18 @@ impl App {
             KeyCode::Char('p') if self.mode == AppMode::BatchReview => {
                 if !self.unclassified_grouped.is_empty() {
                     self.batch_pid_index = 0;
+                    self.batch_scroll_offset = 0;
                     self.mode = AppMode::BatchReviewPids;
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => match self.mode {
                 AppMode::BatchReviewPids => {
                     self.batch_pid_index = self.batch_pid_index.saturating_sub(1);
+                    self.adjust_batch_scroll();
                 }
                 _ => {
                     self.selected_index = self.selected_index.saturating_sub(1);
+                    self.adjust_scroll();
                 }
             },
             KeyCode::Down | KeyCode::Char('j') => match self.mode {
@@ -649,12 +829,14 @@ impl App {
                             self.batch_pid_index += 1;
                         }
                     }
+                    self.adjust_batch_scroll();
                 }
                 _ => {
                     let max = self.list_len();
                     if self.selected_index + 1 < max {
                         self.selected_index += 1;
                     }
+                    self.adjust_scroll();
                 }
             },
             KeyCode::Char('G') => {
@@ -663,6 +845,7 @@ impl App {
                 if max > 0 {
                     self.selected_index = max - 1;
                 }
+                self.adjust_scroll();
             }
             KeyCode::Char('l') => match self.mode {
                 AppMode::ProcessList if self.tree_view => {
@@ -689,6 +872,12 @@ impl App {
             KeyCode::Enter => match self.mode {
                 AppMode::ProcessList if !self.stats.is_empty() => {
                     self.open_action_menu();
+                }
+                AppMode::RuleEditor => {
+                    if let Some(rule) = self.rules.get(self.selected_index) {
+                        self.rule_form = Some(RuleForm::from_rule(rule));
+                        self.mode = AppMode::CreateRule;
+                    }
                 }
                 AppMode::BatchReview => {
                     if let Some(cgroup) = self.unclassified_grouped.get(self.selected_index) {
@@ -739,11 +928,18 @@ impl App {
                             if self.selected_index > 0 && self.selected_index >= self.rules.len() {
                                 self.selected_index = self.rules.len().saturating_sub(1);
                             }
+                            self.adjust_scroll();
                         }
                         Ok(Response::Error(e)) => self.last_error = Some(e),
                         Err(e) => self.last_error = Some(format!("{e:#}")),
                         _ => {}
                     }
+                }
+            }
+            KeyCode::Char('e') if self.mode == AppMode::RuleEditor => {
+                if let Some(rule) = self.rules.get(self.selected_index) {
+                    self.rule_form = Some(RuleForm::from_rule(rule));
+                    self.mode = AppMode::CreateRule;
                 }
             }
             KeyCode::Char('a') if self.mode == AppMode::RuleEditor => {
@@ -764,6 +960,7 @@ impl App {
             KeyCode::Char('t') if self.mode == AppMode::ProcessList => {
                 self.tree_view = !self.tree_view;
                 self.selected_index = 0;
+                self.scroll_offset = 0;
                 self.update_tree_visible_count();
             }
             KeyCode::Char('w') if self.mode == AppMode::ProcessList => {
@@ -771,6 +968,37 @@ impl App {
             }
             KeyCode::Char(' ') if self.mode == AppMode::ProcessList && self.tree_view => {
                 self.toggle_tree_node();
+            }
+            KeyCode::Char('/') if self.mode == AppMode::ProcessList => {
+                self.search_query.clear();
+                self.search_match_indices.clear();
+                self.search_match_pos = 0;
+                self.mode = AppMode::Search;
+            }
+            KeyCode::Char('f') if self.mode == AppMode::ProcessList => {
+                self.search_query.clear();
+                self.mode = AppMode::Filter;
+            }
+            KeyCode::Char('n')
+                if self.mode == AppMode::ProcessList
+                    && !self.search_match_indices.is_empty() =>
+            {
+                self.search_match_pos =
+                    (self.search_match_pos + 1) % self.search_match_indices.len();
+                self.selected_index = self.search_match_indices[self.search_match_pos];
+                self.adjust_scroll();
+            }
+            KeyCode::Char('N')
+                if self.mode == AppMode::ProcessList
+                    && !self.search_match_indices.is_empty() =>
+            {
+                if self.search_match_pos == 0 {
+                    self.search_match_pos = self.search_match_indices.len() - 1;
+                } else {
+                    self.search_match_pos -= 1;
+                }
+                self.selected_index = self.search_match_indices[self.search_match_pos];
+                self.adjust_scroll();
             }
             _ => {}
         }
@@ -977,6 +1205,66 @@ impl App {
                     }
                 }
             }
+        }
+    }
+
+    fn handle_search_key(&mut self, event: KeyEvent) {
+        match event.code {
+            KeyCode::Esc => {
+                if self.mode == AppMode::Search {
+                    self.search_query.clear();
+                    self.search_match_indices.clear();
+                } else {
+                    self.search_query.clear();
+                    self.active_filter.clear();
+                }
+                self.mode = AppMode::ProcessList;
+            }
+            KeyCode::Enter => {
+                if self.mode == AppMode::Search {
+                    self.update_search_matches();
+                    if let Some(&idx) = self.search_match_indices.first() {
+                        self.selected_index = idx;
+                        self.adjust_scroll();
+                    }
+                } else {
+                    self.active_filter = self.search_query.clone();
+                    self.selected_index = 0;
+                    self.scroll_offset = 0;
+                }
+                self.mode = AppMode::ProcessList;
+            }
+            KeyCode::Backspace => {
+                self.search_query.pop();
+                if self.mode == AppMode::Filter {
+                    self.active_filter = self.search_query.clone();
+                    self.selected_index = 0;
+                    self.scroll_offset = 0;
+                    self.update_tree_visible_count();
+                } else {
+                    self.update_search_matches();
+                    if let Some(&idx) = self.search_match_indices.first() {
+                        self.selected_index = idx;
+                        self.adjust_scroll();
+                    }
+                }
+            }
+            KeyCode::Char(c) => {
+                self.search_query.push(c);
+                if self.mode == AppMode::Filter {
+                    self.active_filter = self.search_query.clone();
+                    self.selected_index = 0;
+                    self.scroll_offset = 0;
+                    self.update_tree_visible_count();
+                } else {
+                    self.update_search_matches();
+                    if let Some(&idx) = self.search_match_indices.first() {
+                        self.selected_index = idx;
+                        self.adjust_scroll();
+                    }
+                }
+            }
+            _ => {}
         }
     }
 

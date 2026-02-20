@@ -38,6 +38,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .unclassified_grouped
         .iter()
         .enumerate()
+        .skip(app.scroll_offset)
+        .take(app.visible_rows)
         .map(|(i, cgroup)| {
             let style = if i == app.selected_index {
                 Style::default().bg(Color::DarkGray)

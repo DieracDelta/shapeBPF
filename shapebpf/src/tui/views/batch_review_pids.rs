@@ -47,6 +47,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .processes
         .iter()
         .enumerate()
+        .skip(app.batch_scroll_offset)
+        .take(app.visible_rows)
         .map(|(i, p)| {
             let style = if i == app.batch_pid_index {
                 Style::default().bg(Color::DarkGray)

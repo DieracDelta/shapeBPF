@@ -117,12 +117,15 @@ unsafe fn try_sched_process_fork(ctx: TracePointContext) -> Result<i32, i64> {
 }
 
 /// Cleans up process entry on exit.
+/// Uses TID (lower 32 bits) not TGID (upper 32 bits) so that thread entries
+/// inserted by the fork handler (keyed by child TID) are properly cleaned up.
+/// For the main thread TID == TGID, so exec-inserted entries are also removed.
 #[tracepoint(category = "sched", name = "sched_process_exit")]
 pub fn sched_process_exit(_ctx: TracePointContext) -> i32 {
     let pid_tgid = unsafe { bpf_get_current_pid_tgid() };
-    let pid = (pid_tgid >> 32) as u32;
+    let tid = pid_tgid as u32;
     unsafe {
-        PID_CGROUP_MAP.remove(&pid);
+        PID_CGROUP_MAP.remove(&tid);
     }
     0
 }

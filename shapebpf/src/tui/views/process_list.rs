@@ -8,7 +8,7 @@ use ratatui::Frame;
 
 use shapebpf_common::ipc::CgroupStats;
 
-use crate::tui::app::App;
+use crate::tui::app::{App, AppMode};
 
 // ── Tree data structures ────────────────────────────────────────────
 
@@ -348,11 +348,23 @@ pub fn collect_deep_paths(stats: &[CgroupStats], min_depth: usize) -> HashSet<St
 // ── Drawing ─────────────────────────────────────────────────────────
 
 pub fn draw(f: &mut Frame, app: &App) {
-    let chunks = Layout::vertical([
-        Constraint::Min(10),   // main table
-        Constraint::Length(1), // status bar
-    ])
-    .split(f.area());
+    let filter_bar_active = app.mode == AppMode::Search
+        || app.mode == AppMode::Filter
+        || !app.active_filter.is_empty()
+        || !app.search_match_indices.is_empty();
+    let constraints = if filter_bar_active {
+        vec![
+            Constraint::Min(10),   // main table
+            Constraint::Length(1), // filter/search bar
+            Constraint::Length(1), // status bar
+        ]
+    } else {
+        vec![
+            Constraint::Min(10),   // main table
+            Constraint::Length(1), // status bar
+        ]
+    };
+    let chunks = Layout::vertical(constraints).split(f.area());
 
     // Main bandwidth table
     let (tx_label, rx_label) = if app.wire_rate_view {
@@ -375,14 +387,31 @@ pub fn draw(f: &mut Frame, app: &App) {
             .add_modifier(Modifier::BOLD),
     );
 
+    let scroll = app.scroll_offset;
+    let vis = app.visible_rows;
+
     let rows: Vec<Row> = if app.tree_view {
-        let tree_rows = build_cgroup_tree(&app.stats, &app.collapsed_cgroups);
+        let filtered_stats: Vec<CgroupStats> = if app.active_filter.is_empty() {
+            app.stats.clone()
+        } else {
+            app.stats
+                .iter()
+                .filter(|s| App::matches_query(s, &app.active_filter))
+                .cloned()
+                .collect()
+        };
+        let tree_rows = build_cgroup_tree(&filtered_stats, &app.collapsed_cgroups);
         tree_rows
             .iter()
             .enumerate()
+            .skip(scroll)
+            .take(vis)
             .map(|(i, tr)| {
+                let is_match = app.search_match_indices.contains(&i);
                 let style = if i == app.selected_index {
                     Style::default().bg(Color::DarkGray)
+                } else if is_match {
+                    Style::default().fg(Color::Yellow)
                 } else {
                     Style::default()
                 };
@@ -416,12 +445,27 @@ pub fn draw(f: &mut Frame, app: &App) {
             })
             .collect()
     } else {
-        app.stats
+        // Flat view: apply filter
+        let items: Vec<(usize, &CgroupStats)> = if app.active_filter.is_empty() {
+            app.stats.iter().enumerate().collect()
+        } else {
+            app.stats
+                .iter()
+                .enumerate()
+                .filter(|(_, s)| App::matches_query(s, &app.active_filter))
+                .collect()
+        };
+        items
             .iter()
             .enumerate()
-            .map(|(i, s)| {
-                let style = if i == app.selected_index {
+            .skip(scroll)
+            .take(vis)
+            .map(|(visible_i, (_orig_i, s))| {
+                let is_match = app.search_match_indices.contains(&visible_i);
+                let style = if visible_i == app.selected_index {
                     Style::default().bg(Color::DarkGray)
+                } else if is_match {
+                    Style::default().fg(Color::Yellow)
                 } else {
                     Style::default()
                 };
@@ -491,12 +535,50 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     f.render_widget(table, chunks[0]);
 
+    // Filter/search bar (when active)
+    let status_chunk_idx = if filter_bar_active {
+        let (label, query) = if app.mode == AppMode::Search {
+            ("Search: ", &app.search_query)
+        } else if app.mode == AppMode::Filter {
+            ("Filter: ", &app.search_query)
+        } else if !app.active_filter.is_empty() {
+            ("Filter: ", &app.active_filter)
+        } else {
+            ("Search: ", &app.search_query)
+        };
+        let cursor = if app.mode == AppMode::Search || app.mode == AppMode::Filter {
+            "_"
+        } else {
+            ""
+        };
+        let match_info = if !app.search_match_indices.is_empty() {
+            format!(
+                " [{}/{}]",
+                app.search_match_pos + 1,
+                app.search_match_indices.len()
+            )
+        } else {
+            String::new()
+        };
+        let bar = Line::from(vec![
+            Span::styled(label, Style::default().fg(Color::Cyan)),
+            Span::raw(format!("{query}{cursor}")),
+            Span::styled(match_info, Style::default().fg(Color::DarkGray)),
+        ]);
+        f.render_widget(Paragraph::new(bar), chunks[1]);
+        2 // status bar is at index 2
+    } else {
+        1 // status bar is at index 1
+    };
+
     // Status bar
     let mut hints: Vec<Span> = Vec::new();
     if let Some(ref msg) = app.status_message {
         hints.push(Span::styled(
             format!(" {msg}  "),
-            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
         ));
         hints.push(Span::raw("| "));
     }
@@ -511,6 +593,10 @@ pub fn draw(f: &mut Frame, app: &App) {
         Span::raw(" tree  "),
         Span::styled("w", Style::default().fg(Color::Green)),
         Span::raw(" wire  "),
+        Span::styled("/", Style::default().fg(Color::Green)),
+        Span::raw(" search  "),
+        Span::styled("f", Style::default().fg(Color::Green)),
+        Span::raw(" filter  "),
         Span::styled("Enter/l", Style::default().fg(Color::Green)),
         Span::raw(" actions  "),
         Span::styled("gg/G", Style::default().fg(Color::Green)),
@@ -526,14 +612,14 @@ pub fn draw(f: &mut Frame, app: &App) {
         hints.push(Span::raw(" folds"));
     }
     let status = Line::from(hints);
-    f.render_widget(Paragraph::new(status), chunks[1]);
+    f.render_widget(Paragraph::new(status), chunks[status_chunk_idx]);
 
     // Git hash in bottom-right
     let hash = env!("GIT_HASH");
     if !hash.is_empty() {
         let label = format!("{hash} ");
         let w = label.len() as u16;
-        let bar = chunks[1];
+        let bar = chunks[status_chunk_idx];
         if bar.width > w {
             let version_area = Rect::new(bar.x + bar.width - w, bar.y, w, 1);
             let version = Paragraph::new(label)

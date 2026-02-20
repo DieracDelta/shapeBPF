@@ -32,6 +32,8 @@ pub fn draw(f: &mut Frame, app: &App) {
         .rules
         .iter()
         .enumerate()
+        .skip(app.scroll_offset)
+        .take(app.visible_rows)
         .map(|(i, r)| {
             let style = if i == app.selected_index {
                 Style::default().bg(Color::DarkGray)
@@ -86,6 +88,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let status = Line::from(vec![
         Span::styled(" Esc", Style::default().fg(Color::Green)),
         Span::raw(" back  "),
+        Span::styled("e/Enter", Style::default().fg(Color::Green)),
+        Span::raw(" edit  "),
         Span::styled("a", Style::default().fg(Color::Green)),
         Span::raw(" add  "),
         Span::styled("d", Style::default().fg(Color::Green)),
