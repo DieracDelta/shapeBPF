@@ -14,6 +14,10 @@ pub struct StatsCollector {
     prev_pid_traffic: HashMap<u32, TrafficStats>,
     last_traffic_update: Option<std::time::Instant>,
     last_pid_traffic_update: Option<std::time::Instant>,
+    /// Ingress (RX) per-second rates from cgroup_skb/ingress observer
+    ingress_traffic: HashMap<u64, TrafficStats>,
+    prev_ingress_traffic: HashMap<u64, TrafficStats>,
+    last_ingress_traffic_update: Option<std::time::Instant>,
     /// cgroup_id -> per-second wire rate (post-EDT, computed from deltas)
     wire_traffic: HashMap<u64, TrafficStats>,
     /// pid -> per-second wire rate (post-EDT, computed from deltas)
@@ -45,6 +49,9 @@ impl StatsCollector {
             prev_pid_traffic: HashMap::new(),
             last_traffic_update: None,
             last_pid_traffic_update: None,
+            ingress_traffic: HashMap::new(),
+            prev_ingress_traffic: HashMap::new(),
+            last_ingress_traffic_update: None,
             wire_traffic: HashMap::new(),
             pid_wire_traffic: HashMap::new(),
             prev_wire_traffic: HashMap::new(),
@@ -141,6 +148,45 @@ impl StatsCollector {
             self.prev_pid_traffic.insert(pid, cumulative);
         }
         self.last_pid_traffic_update = Some(now);
+    }
+
+    pub fn update_ingress_traffic(&mut self, stats: Vec<(u64, TrafficStats)>) {
+        let now = std::time::Instant::now();
+        let elapsed_secs = self
+            .last_ingress_traffic_update
+            .map(|t| now.duration_since(t).as_secs_f64())
+            .unwrap_or(1.0)
+            .max(0.001);
+
+        self.ingress_traffic.clear();
+        for &(cgroup_id, ref cumulative) in &stats {
+            let rate = if let Some(prev) = self.prev_ingress_traffic.get(&cgroup_id) {
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: (cumulative.rx_bytes.saturating_sub(prev.rx_bytes) as f64
+                        / elapsed_secs) as u64,
+                    tx_packets: 0,
+                    rx_packets: (cumulative.rx_packets.saturating_sub(prev.rx_packets) as f64
+                        / elapsed_secs) as u64,
+                    drops: 0,
+                }
+            } else {
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: 0,
+                    tx_packets: 0,
+                    rx_packets: 0,
+                    drops: 0,
+                }
+            };
+            self.ingress_traffic.insert(cgroup_id, rate);
+        }
+
+        self.prev_ingress_traffic.clear();
+        for (cgroup_id, cumulative) in stats {
+            self.prev_ingress_traffic.insert(cgroup_id, cumulative);
+        }
+        self.last_ingress_traffic_update = Some(now);
     }
 
     pub fn update_wire_traffic(&mut self, stats: Vec<(u64, TrafficStats)>) {
@@ -305,6 +351,9 @@ impl StatsCollector {
                 })
                 .collect();
 
+            // Merge ingress RX data from cgroup_skb/ingress observer
+            let ingress = self.ingress_traffic.get(&cgroup_id);
+
             let wire_stats = self
                 .wire_traffic
                 .get(&cgroup_id)
@@ -316,6 +365,19 @@ impl StatsCollector {
                     rx_packets: 0,
                     drops: 0,
                 });
+
+            // Build merged stats: qdisc provides TX, ingress observer provides RX
+            let merged_stats = if let Some(ing) = ingress {
+                TrafficStats {
+                    tx_bytes: stats.tx_bytes,
+                    rx_bytes: ing.rx_bytes,
+                    tx_packets: stats.tx_packets,
+                    rx_packets: ing.rx_packets,
+                    drops: stats.drops,
+                }
+            } else {
+                *stats
+            };
 
             let matched_rule_name = self.rule_assignments.get(&cgroup_id).cloned();
             let created_by_shapebpf = self.created_cgroups.contains_key(&cgroup_path);
@@ -330,7 +392,7 @@ impl StatsCollector {
             result.push(CgroupStats {
                 cgroup_id,
                 cgroup_path,
-                stats: *stats,
+                stats: merged_stats,
                 wire_stats,
                 config: self.configs.get(&cgroup_id).copied(),
                 processes,
@@ -389,16 +451,30 @@ impl StatsCollector {
                 false
             };
 
-            result.push(CgroupStats {
-                cgroup_id,
-                cgroup_path,
-                stats: TrafficStats {
+            // Merge ingress RX data even if no egress traffic
+            let ingress_stats = self.ingress_traffic.get(&cgroup_id);
+            let merged_stats = if let Some(ing) = ingress_stats {
+                TrafficStats {
+                    tx_bytes: 0,
+                    rx_bytes: ing.rx_bytes,
+                    tx_packets: 0,
+                    rx_packets: ing.rx_packets,
+                    drops: 0,
+                }
+            } else {
+                TrafficStats {
                     tx_bytes: 0,
                     rx_bytes: 0,
                     tx_packets: 0,
                     rx_packets: 0,
                     drops: 0,
-                },
+                }
+            };
+
+            result.push(CgroupStats {
+                cgroup_id,
+                cgroup_path,
+                stats: merged_stats,
                 wire_stats,
                 config: self.configs.get(&cgroup_id).copied(),
                 processes,

@@ -56,7 +56,13 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let config = Config::load(&config_path)?;
 
     log::info!("loading eBPF programs");
-    let loader = EbpfLoader::load()?;
+    let mut loader = EbpfLoader::load()?;
+
+    // Seed existing processes into PID_CGROUP_MAP before main loop
+    match loader.seed_existing_processes() {
+        Ok(count) => log::info!("seeded {count} existing processes into PID_CGROUP_MAP"),
+        Err(e) => log::warn!("failed to seed existing processes: {e:#}"),
+    }
 
     // Set default rate limit (non-fatal if qdisc isn't loaded)
     let loader = Arc::new(Mutex::new(loader));
@@ -165,6 +171,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
             if let Ok(pid_wire) = loader.read_pid_wire_traffic_stats() {
                 let mut s = stats_clone.lock().await;
                 s.update_pid_wire_traffic(pid_wire);
+            }
+            if let Ok(ingress) = loader.read_ingress_traffic_stats() {
+                let mut s = stats_clone.lock().await;
+                s.update_ingress_traffic(ingress);
             }
         }
     });

@@ -662,6 +662,13 @@ impl App {
                 }
                 'z' => {
                     if let KeyCode::Char(c) = code {
+                        if c == 'z' {
+                            // zz: center current selection in viewport
+                            if self.visible_rows > 0 {
+                                self.scroll_offset = self.selected_index.saturating_sub(self.visible_rows / 2);
+                            }
+                            return;
+                        }
                         self.handle_fold_key(c);
                         return;
                     }
@@ -679,7 +686,7 @@ impl App {
                         self.pending_key = Some('g');
                         return;
                     }
-                    'z' if self.mode == AppMode::ProcessList && self.tree_view => {
+                    'z' if self.mode == AppMode::ProcessList => {
                         self.pending_key = Some('z');
                         return;
                     }
@@ -846,6 +853,22 @@ impl App {
                     self.selected_index = max - 1;
                 }
                 self.adjust_scroll();
+            }
+            KeyCode::Char('H') if self.mode == AppMode::ProcessList => {
+                // H: move to top of visible area
+                self.selected_index = self.scroll_offset;
+            }
+            KeyCode::Char('M') if self.mode == AppMode::ProcessList => {
+                // M: move to middle of visible area
+                let max = self.list_len();
+                let mid = self.scroll_offset + self.visible_rows / 2;
+                self.selected_index = mid.min(max.saturating_sub(1));
+            }
+            KeyCode::Char('L') if self.mode == AppMode::ProcessList => {
+                // L: move to bottom of visible area
+                let max = self.list_len();
+                let bottom = self.scroll_offset + self.visible_rows.saturating_sub(1);
+                self.selected_index = bottom.min(max.saturating_sub(1));
             }
             KeyCode::Char('l') => match self.mode {
                 AppMode::ProcessList if self.tree_view => {
