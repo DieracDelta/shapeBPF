@@ -25,6 +25,22 @@ impl Discovery {
         resolve_cgroup_by_inode(cgroup_id)
     }
 
+    /// Check if a PID is a thread group leader (process, not a thread).
+    /// Returns false for threads (TID != TGID), true for processes.
+    pub fn is_thread_group_leader(pid: u32) -> bool {
+        let path = format!("/proc/{pid}/status");
+        let content = match fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(_) => return true, // dead process, let caller handle
+        };
+        for line in content.lines() {
+            if let Some(tgid_str) = line.strip_prefix("Tgid:\t") {
+                return tgid_str.trim().parse::<u32>().ok() == Some(pid);
+            }
+        }
+        true
+    }
+
     /// Get the cgroup path for a given PID.
     pub fn pid_cgroup_path(pid: u32) -> Option<String> {
         let path = format!("/proc/{pid}/cgroup");

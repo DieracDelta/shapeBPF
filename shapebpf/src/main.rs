@@ -190,6 +190,10 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 let mut rule_assignments = Vec::new();
                 let mut rule_configs: Vec<(u64, RateConfig)> = Vec::new();
                 for (_pid, ev) in &events {
+                    // Skip threads (non-leader TIDs from fork tracepoint)
+                    if !Discovery::is_thread_group_leader(ev.pid) {
+                        continue;
+                    }
                     let comm = core::str::from_utf8(&ev.comm)
                         .unwrap_or("")
                         .trim_end_matches('\0')
