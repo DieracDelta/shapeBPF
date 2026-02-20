@@ -124,7 +124,8 @@ in {
           "CAP_PERFMON"
         ];
 
-        # Socket directory
+        # Socket directory - Group ensures /run/shapebpf is root:shapebpf
+        Group = cfg.group;
         RuntimeDirectory = "shapebpf";
         RuntimeDirectoryMode = "0750";
 
