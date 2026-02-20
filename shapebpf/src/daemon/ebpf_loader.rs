@@ -142,7 +142,7 @@ impl EbpfLoader {
             .open_memory(INGRESS_OBJ)
             .context("opening ingress BPF object")?;
 
-        let mut obj = open_obj.load().context("loading ingress BPF object")?;
+        let obj = open_obj.load().context("loading ingress BPF object")?;
 
         // Find the cgroup_skb/ingress program
         let prog = obj

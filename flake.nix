@@ -153,15 +153,19 @@
                     | sed '/^extern.*__ksym;$/d' \
                     > shapebpf-ebpf/src/bpf/vmlinux.h
                   # Use stable LLVM 19 for C BPF compilation
-                  ${pkgs.llvmPackages_19.clang-unwrapped}/bin/clang -target bpf -mcpu=v4 -g -O2 -Wall \
-                    -D__TARGET_ARCH_${if system == "x86_64-linux" then "x86" else "arm64"} \
-                    -I shapebpf-ebpf/src/bpf \
-                    -I ${pkgs.libbpf}/include \
-                    -c shapebpf-ebpf/src/bpf/qdisc.bpf.c \
-                    -o shapebpf-ebpf/target/bpf/qdisc.bpf.o
+                  for bpf_src in qdisc ingress; do
+                    ${pkgs.llvmPackages_19.clang-unwrapped}/bin/clang -target bpf -mcpu=v4 -g -O2 -Wall \
+                      -D__TARGET_ARCH_${if system == "x86_64-linux" then "x86" else "arm64"} \
+                      -I shapebpf-ebpf/src/bpf \
+                      -I ${pkgs.libbpf}/include \
+                      -c shapebpf-ebpf/src/bpf/$bpf_src.bpf.c \
+                      -o shapebpf-ebpf/target/bpf/$bpf_src.bpf.o
+                  done
                 else
                   echo "WARNING: kernel vmlinux not found, creating minimal BPF stub"
-                  echo "int _placeholder = 0;" | ${pkgs.llvmPackages_19.clang-unwrapped}/bin/clang -target bpf -g -O2 -c -x c - -o shapebpf-ebpf/target/bpf/qdisc.bpf.o
+                  for bpf_src in qdisc ingress; do
+                    echo "int _placeholder = 0;" | ${pkgs.llvmPackages_19.clang-unwrapped}/bin/clang -target bpf -g -O2 -c -x c - -o shapebpf-ebpf/target/bpf/$bpf_src.bpf.o
+                  done
                 fi
 
                 # Phase 2: Build userspace (embeds eBPF objects)
