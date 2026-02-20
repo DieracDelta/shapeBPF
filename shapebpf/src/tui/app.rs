@@ -247,6 +247,7 @@ impl RuleForm {
             egress_rate_bps: egress.filter(|&v| v > 0),
             ingress_rate_bps: ingress.filter(|&v| v > 0),
             priority,
+            ephemeral: false,
         })
     }
 }
@@ -1051,7 +1052,9 @@ impl App {
             }
             KeyCode::Enter => {
                 // If pending isolation, perform it first using the form's name
+                let mut is_isolate = false;
                 if let Some(isolate_pid) = form.pending_isolate_pid.take() {
+                    is_isolate = true;
                     let isolate_name = if form.name.is_empty() {
                         format!("pid{isolate_pid}")
                     } else {
@@ -1088,7 +1091,10 @@ impl App {
 
                 let form = self.rule_form.as_ref().unwrap();
                 let rule_name_for_msg = form.name.clone();
-                if let Some(rule) = form.to_rule() {
+                if let Some(mut rule) = form.to_rule() {
+                    if is_isolate {
+                        rule.ephemeral = true;
+                    }
                     match self.client.request(&Request::UpsertRule { rule }).await {
                         Ok(Response::Ok) => {
                             self.rule_form = None;
@@ -1110,5 +1116,78 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_process_info(comm: &str, cgroup: &str, uid: u32) -> ProcessInfo {
+        ProcessInfo {
+            pid: 1234,
+            uid,
+            comm: comm.to_string(),
+            cgroup_id: 100,
+            cgroup_path: cgroup.to_string(),
+            tx_bytes: 0,
+            rx_bytes: 0,
+            wire_tx_bytes: 0,
+            wire_rx_bytes: 0,
+        }
+    }
+
+    #[test]
+    fn to_rule_defaults_ephemeral_false() {
+        let form = RuleForm::from_process(&make_process_info("bash", "/sys/user/bash", 1000));
+        let rule = form.to_rule().unwrap();
+        assert!(!rule.ephemeral);
+    }
+
+    #[test]
+    fn to_rule_from_cgroup_defaults_ephemeral_false() {
+        let cgroup = UnclassifiedCgroup {
+            cgroup_id: 42,
+            cgroup_path: "/sys/fs/cgroup/user.slice".to_string(),
+            processes: vec![make_process_info("firefox", "/sys/fs/cgroup/user.slice", 1000)],
+        };
+        let form = RuleForm::from_cgroup(&cgroup);
+        let rule = form.to_rule().unwrap();
+        assert!(!rule.ephemeral);
+    }
+
+    #[test]
+    fn to_rule_from_existing_rule_defaults_ephemeral_false() {
+        let existing = Rule {
+            name: "test".to_string(),
+            match_criteria: MatchCriteria::ProcessName("bash".to_string()),
+            egress_rate_bps: Some(1_000_000),
+            ingress_rate_bps: None,
+            priority: 5,
+            ephemeral: false,
+        };
+        let form = RuleForm::from_rule(&existing);
+        let rule = form.to_rule().unwrap();
+        assert!(!rule.ephemeral);
+    }
+
+    #[test]
+    fn pending_isolate_pid_form_produces_non_ephemeral_by_default() {
+        // to_rule() itself always returns ephemeral: false.
+        // The caller (handle_form_key) is responsible for setting ephemeral: true
+        // when pending_isolate_pid was set.
+        let mut form = RuleForm::from_process(&make_process_info("bash", "/cgroup", 1000));
+        form.pending_isolate_pid = Some(999);
+        let rule = form.to_rule().unwrap();
+        assert!(!rule.ephemeral);
+    }
+
+    #[test]
+    fn ephemeral_field_can_be_set_after_to_rule() {
+        // Simulates what handle_form_key does for isolate flows
+        let form = RuleForm::from_process(&make_process_info("bash", "/cgroup", 1000));
+        let mut rule = form.to_rule().unwrap();
+        rule.ephemeral = true;
+        assert!(rule.ephemeral);
     }
 }

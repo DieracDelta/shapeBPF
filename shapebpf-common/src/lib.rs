@@ -175,6 +175,8 @@ pub mod ipc {
         pub egress_rate_bps: Option<u64>,
         pub ingress_rate_bps: Option<u64>,
         pub priority: u8,
+        #[serde(default)]
+        pub ephemeral: bool,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

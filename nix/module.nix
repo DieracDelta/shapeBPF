@@ -128,6 +128,10 @@ in {
         RuntimeDirectory = "shapebpf";
         RuntimeDirectoryMode = "0750";
 
+        # Persistent state (rules.json)
+        StateDirectory = "shapebpf";
+        StateDirectoryMode = "0750";
+
         # Security hardening
         ProtectSystem = "strict";
         ProtectHome = true;
@@ -135,7 +139,7 @@ in {
         ProtectControlGroups = false; # needed for PID isolation (child cgroup creation)
         NoNewPrivileges = false; # needed for BPF
         Delegate = true;
-        ReadWritePaths = [ "/run/shapebpf" "/sys/fs/bpf" ];
+        ReadWritePaths = [ "/run/shapebpf" "/sys/fs/bpf" "/var/lib/shapebpf" ];
       };
     };
 

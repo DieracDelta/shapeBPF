@@ -32,7 +32,7 @@
           # Vendor workspace deps (userspace crates)
           workspaceVendor = pkgs.rustPlatform.fetchCargoVendor {
             src = ./.;
-            hash = "sha256-gZqE92k8i6ySJByCV47RHHylPrHYhmk58LJz8P2SWes=";
+            hash = "sha256-MKGGtq68rGeH83X0o6MRJ2EmH7yqWBb1vDcrkOGqAgc=";
           };
 
           # Combined LLVM 22 for bpf-linker

@@ -19,6 +19,7 @@ use shapebpf_common::RateConfig;
 
 const DEFAULT_CONFIG_PATH: &str = "/etc/shapebpf/config.toml";
 const SOCKET_PATH: &str = "/run/shapebpf/shapebpf.sock";
+const RULES_PATH: &str = "/var/lib/shapebpf/rules.json";
 
 #[derive(Parser)]
 #[command(name = "shapebpf-daemon", about = "Per-process bandwidth shaping daemon")]
@@ -73,35 +74,54 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
         }
     }
 
-    // Load rules
+    // Load rules: try persisted file first, fall back to config
+    let rules_path = std::path::Path::new(RULES_PATH);
     let mut rule_engine = RuleEngine::new();
-    let rules: Vec<Rule> = config
-        .rules
-        .iter()
-        .map(|r| {
-            let criteria = if let Some(ref user) = r.user {
-                MatchCriteria::User(user.clone())
-            } else if let Some(ref container) = r.container_name {
-                MatchCriteria::ContainerName(container.clone())
-            } else if let Some(ref unit) = r.service_unit {
-                MatchCriteria::ServiceUnit(unit.clone())
-            } else if let Some(ref path) = r.cgroup_path {
-                MatchCriteria::CgroupPath(path.clone())
-            } else if let Some(ref name) = r.process_name {
-                MatchCriteria::ProcessName(name.clone())
-            } else {
-                MatchCriteria::ProcessName(r.name.clone())
-            };
-            Rule {
-                name: r.name.clone(),
-                match_criteria: criteria,
-                egress_rate_bps: r.egress_rate_bps,
-                ingress_rate_bps: r.ingress_rate_bps,
-                priority: r.priority,
-            }
-        })
-        .collect();
-    rule_engine.load_rules(rules);
+    match RuleEngine::load_rules_from_file(rules_path) {
+        Ok(rules) => {
+            log::info!("loaded {} rules from {}", rules.len(), RULES_PATH);
+            rule_engine.load_rules(rules);
+        }
+        Err(_) => {
+            log::info!("no persisted rules file, seeding from config");
+            let rules: Vec<Rule> = config
+                .rules
+                .iter()
+                .map(|r| {
+                    let criteria = if let Some(ref user) = r.user {
+                        MatchCriteria::User(user.clone())
+                    } else if let Some(ref container) = r.container_name {
+                        MatchCriteria::ContainerName(container.clone())
+                    } else if let Some(ref unit) = r.service_unit {
+                        MatchCriteria::ServiceUnit(unit.clone())
+                    } else if let Some(ref path) = r.cgroup_path {
+                        MatchCriteria::CgroupPath(path.clone())
+                    } else if let Some(ref name) = r.process_name {
+                        MatchCriteria::ProcessName(name.clone())
+                    } else {
+                        MatchCriteria::ProcessName(r.name.clone())
+                    };
+                    Rule {
+                        name: r.name.clone(),
+                        match_criteria: criteria,
+                        egress_rate_bps: r.egress_rate_bps,
+                        ingress_rate_bps: r.ingress_rate_bps,
+                        priority: r.priority,
+                        ephemeral: false,
+                    }
+                })
+                .collect();
+            rule_engine.load_rules(rules);
+        }
+    }
+    // Ensure persistence directory exists and configure auto-save
+    if let Some(parent) = rules_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            log::warn!("failed to create {}: {e:#}", parent.display());
+        }
+    }
+    rule_engine.set_rules_path(rules_path.to_path_buf());
+    rule_engine.save_rules();
     let rules = Arc::new(Mutex::new(rule_engine));
 
     let stats = Arc::new(Mutex::new(StatsCollector::new()));
