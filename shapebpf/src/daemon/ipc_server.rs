@@ -133,7 +133,12 @@ async fn dispatch(
         Request::SetCgroupLimit { cgroup_id, config } => {
             let mut loader = loader.lock().await;
             match loader.set_cgroup_limit(cgroup_id, config) {
-                Ok(()) => Response::Ok,
+                Ok(()) => {
+                    if let Err(e) = loader.set_ingress_limit(cgroup_id, config) {
+                        log::debug!("set_ingress_limit: {e:#}");
+                    }
+                    Response::Ok
+                }
                 Err(e) => Response::Error(format!("{e:#}")),
             }
         }
@@ -147,7 +152,12 @@ async fn dispatch(
         Request::SetDefault { config } => {
             let mut loader = loader.lock().await;
             match loader.set_default_config(config) {
-                Ok(()) => Response::Ok,
+                Ok(()) => {
+                    if let Err(e) = loader.set_ingress_default_config(config) {
+                        log::debug!("set_ingress_default_config: {e:#}");
+                    }
+                    Response::Ok
+                }
                 Err(e) => Response::Error(format!("{e:#}")),
             }
         }
@@ -247,11 +257,14 @@ async fn merge_cgroup_back(
         log::warn!("failed to rmdir {sysfs_path}: {e}");
     }
 
-    // Remove BPF map entry
+    // Remove BPF map entries
     if let Some(id) = cgroup_id {
         let mut l = loader.lock().await;
         if let Err(e) = l.remove_cgroup_limit(id) {
             log::debug!("remove_cgroup_limit: {e}");
+        }
+        if let Err(e) = l.remove_ingress_limit(id) {
+            log::debug!("remove_ingress_limit: {e}");
         }
     }
 

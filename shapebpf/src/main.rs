@@ -68,15 +68,21 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
     let loader = Arc::new(Mutex::new(loader));
     {
         let mut l = loader.lock().await;
+        let default_config = RateConfig {
+            egress_rate_bps: config.default_rule.egress_rate_bps,
+            ingress_rate_bps: config.default_rule.ingress_rate_bps,
+            priority: config.default_rule.priority,
+            _pad: [0; 7],
+        };
         if l.qdisc_loaded() {
-            l.set_default_config(RateConfig {
-                egress_rate_bps: config.default_rule.egress_rate_bps,
-                ingress_rate_bps: config.default_rule.ingress_rate_bps,
-                priority: config.default_rule.priority,
-                _pad: [0; 7],
-            })?;
+            l.set_default_config(default_config)?;
         } else {
             log::warn!("qdisc not loaded - rate limiting disabled, running in monitor-only mode");
+        }
+        if l.ingress_loaded() {
+            if let Err(e) = l.set_ingress_default_config(default_config) {
+                log::warn!("failed to set ingress default config: {e:#}");
+            }
         }
     }
 
@@ -267,6 +273,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                     if let Err(e) = loader.set_cgroup_limit(cgroup_id, config) {
                         log::debug!("set_cgroup_limit for rule match: {e:#}");
                     }
+                    if let Err(e) = loader.set_ingress_limit(cgroup_id, config) {
+                        log::debug!("set_ingress_limit for rule match: {e:#}");
+                    }
                 }
                 let mut s = stats_clone2.lock().await;
                 // Update configs in stats for TUI display
@@ -337,6 +346,9 @@ async fn run_daemon(config_path: PathBuf) -> Result<()> {
                 for &(cgroup_id, config) in &cgroup_rule_configs {
                     if let Err(e) = loader.set_cgroup_limit(cgroup_id, config) {
                         log::debug!("set_cgroup_limit for cgroup match: {e:#}");
+                    }
+                    if let Err(e) = loader.set_ingress_limit(cgroup_id, config) {
+                        log::debug!("set_ingress_limit for cgroup match: {e:#}");
                     }
                 }
                 drop(loader);

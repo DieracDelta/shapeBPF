@@ -180,6 +180,11 @@ impl EbpfLoader {
         self.qdisc_obj.is_some()
     }
 
+    /// Whether the ingress program is loaded.
+    pub fn ingress_loaded(&self) -> bool {
+        self.ingress_obj.is_some()
+    }
+
     /// Set a per-cgroup rate limit in the qdisc's BPF map.
     pub fn set_cgroup_limit(&mut self, cgroup_id: u64, config: RateConfig) -> Result<()> {
         let obj = self.qdisc_obj.as_mut().context("qdisc not loaded")?;
@@ -220,6 +225,38 @@ impl EbpfLoader {
         let val = as_bytes(&config);
         map.update(&key, val, libbpf_rs::MapFlags::ANY)
             .context("updating DEFAULT_CONFIG")?;
+        Ok(())
+    }
+
+    /// Set a per-cgroup ingress rate limit in the ingress BPF map.
+    pub fn set_ingress_limit(&mut self, cgroup_id: u64, config: RateConfig) -> Result<()> {
+        let obj = self.ingress_obj.as_mut().context("ingress not loaded")?;
+        let map = find_map_mut(obj, "INGRESS_RATE_LIMITS")?;
+        let key = cgroup_id.to_ne_bytes();
+        let val = as_bytes(&config);
+        map.update(&key, val, libbpf_rs::MapFlags::ANY)
+            .context("updating INGRESS_RATE_LIMITS")?;
+        Ok(())
+    }
+
+    /// Remove a per-cgroup ingress rate limit from the ingress BPF map.
+    pub fn remove_ingress_limit(&mut self, cgroup_id: u64) -> Result<()> {
+        let obj = self.ingress_obj.as_mut().context("ingress not loaded")?;
+        let map = find_map_mut(obj, "INGRESS_RATE_LIMITS")?;
+        let key = cgroup_id.to_ne_bytes();
+        map.delete(&key)
+            .context("deleting from INGRESS_RATE_LIMITS")?;
+        Ok(())
+    }
+
+    /// Set the default ingress rate limit config.
+    pub fn set_ingress_default_config(&mut self, config: RateConfig) -> Result<()> {
+        let obj = self.ingress_obj.as_mut().context("ingress not loaded")?;
+        let map = find_map_mut(obj, "INGRESS_DEFAULT_CONFIG")?;
+        let key = 0u32.to_ne_bytes();
+        let val = as_bytes(&config);
+        map.update(&key, val, libbpf_rs::MapFlags::ANY)
+            .context("updating INGRESS_DEFAULT_CONFIG")?;
         Ok(())
     }
 
