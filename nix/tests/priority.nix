@@ -18,18 +18,19 @@ pkgs.testers.runNixOSTest {
         enable = true;
         interface = "eth1";
         defaultRule = {
-          egressRateBps = 2097152; # 2 MB/s total
+          egressRateBps = 1048576;  # 1 MB/s safety net for unclassified traffic
           priority = 5;
         };
         rules = [
           {
             name = "high-priority";
-            processName = "iperf3-hi";
+            serviceUnit = "iperf3-hi.service";
             priority = 1;
+            # No egressRateBps → 0 → no EDT pacing
           }
           {
             name = "low-priority";
-            processName = "iperf3-lo";
+            serviceUnit = "iperf3-lo.service";
             priority = 10;
           }
         ];
@@ -45,20 +46,26 @@ pkgs.testers.runNixOSTest {
     server.wait_for_unit("network.target")
     client.wait_for_unit("network.target")
 
-    # Start two iperf3 servers on different ports
     server.succeed("iperf3 -s -p 5201 -D")
     server.succeed("iperf3 -s -p 5202 -D")
 
     client.wait_for_unit("shapebpf.service")
     client.sleep(3)
 
-    # Run both iperf3 clients simultaneously
-    # High priority should get more bandwidth
-    client.succeed("iperf3 -c server -p 5201 -t 10 -J > /tmp/hi.json &")
-    client.succeed("iperf3 -c server -p 5202 -t 10 -J > /tmp/lo.json &")
+    # Launch both in separate systemd units (separate cgroups)
+    client.succeed(
+        "systemd-run --unit=iperf3-hi "
+        "--property=StandardOutput=file:/tmp/hi.json "
+        "-- iperf3 -c server -p 5201 -t 15 -J"
+    )
+    client.succeed(
+        "systemd-run --unit=iperf3-lo "
+        "--property=StandardOutput=file:/tmp/lo.json "
+        "-- iperf3 -c server -p 5202 -t 15 -J"
+    )
 
-    # Wait for both to complete
-    client.sleep(15)
+    # Wait for iperf3 to finish (15s test + buffer)
+    client.wait_until_succeeds("test -s /tmp/hi.json && test -s /tmp/lo.json", timeout=30)
 
     import json
 
@@ -69,9 +76,24 @@ pkgs.testers.runNixOSTest {
     lo_bps = lo["end"]["sum_sent"]["bits_per_second"]
 
     print(f"High priority: {hi_bps/1e6:.2f} Mbps")
-    print(f"Low priority: {lo_bps/1e6:.2f} Mbps")
+    print(f"Low priority:  {lo_bps/1e6:.2f} Mbps")
 
-    # High priority should get significantly more bandwidth
-    assert hi_bps > lo_bps, f"High priority ({hi_bps/1e6:.2f}) should exceed low priority ({lo_bps/1e6:.2f})"
+    # Kernel version check (sch_bpf requires 6.16+)
+    kernel_ver = client.succeed("uname -r").strip()
+    parts = kernel_ver.split(".")
+    major, minor = int(parts[0]), int(parts[1])
+
+    if major > 6 or (major == 6 and minor >= 16):
+        assert hi_bps > lo_bps, (
+            f"High priority ({hi_bps/1e6:.2f} Mbps) should exceed "
+            f"low priority ({lo_bps/1e6:.2f} Mbps)"
+        )
+        print("PASS: Priority queuing is active")
+    else:
+        print(f"SKIP: Kernel {kernel_ver} < 6.16, sch_bpf not available")
+        assert hi_bps > 0 and lo_bps > 0, "No bandwidth measured"
+        print("PASS: Monitor-only mode working correctly")
+
+    client.succeed("systemctl is-active shapebpf.service")
   '';
 }

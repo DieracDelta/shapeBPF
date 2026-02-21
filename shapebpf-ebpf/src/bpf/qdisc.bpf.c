@@ -47,7 +47,9 @@ struct skb_node {
 
 struct q_state {
 	struct bpf_spin_lock lock;
-	struct bpf_list_head list __contains(skb_node, node);
+	struct bpf_list_head high __contains(skb_node, node);   // priority 1-3
+	struct bpf_list_head normal __contains(skb_node, node); // priority 4-7
+	struct bpf_list_head low __contains(skb_node, node);    // priority 8-10
 };
 
 struct {
@@ -272,8 +274,14 @@ int BPF_PROG(shapebpf_enqueue, struct sk_buff *skb, struct Qdisc *sch,
 	if (skb)
 		bpf_qdisc_skb_drop(skb, to_free);
 
+	__u8 prio = cfg ? cfg->priority : 5;
 	bpf_spin_lock(&q->lock);
-	bpf_list_push_back(&q->list, &skbn->node);
+	if (prio <= 3)
+		bpf_list_push_back(&q->high, &skbn->node);
+	else if (prio <= 7)
+		bpf_list_push_back(&q->normal, &skbn->node);
+	else
+		bpf_list_push_back(&q->low, &skbn->node);
 	bpf_spin_unlock(&q->lock);
 
 	sch->qstats.backlog += pkt_len;
@@ -299,8 +307,17 @@ struct sk_buff *BPF_PROG(shapebpf_dequeue, struct Qdisc *sch)
 	if (!q)
 		return NULL;
 
+	int band = 0;
 	bpf_spin_lock(&q->lock);
-	node = bpf_list_pop_front(&q->list);
+	node = bpf_list_pop_front(&q->high);
+	if (!node) {
+		node = bpf_list_pop_front(&q->normal);
+		band = 1;
+	}
+	if (!node) {
+		node = bpf_list_pop_front(&q->low);
+		band = 2;
+	}
 	bpf_spin_unlock(&q->lock);
 	if (!node)
 		return NULL;
@@ -331,7 +348,12 @@ struct sk_buff *BPF_PROG(shapebpf_dequeue, struct Qdisc *sch)
 				bpf_kfree_skb(old);
 
 			bpf_spin_lock(&q->lock);
-			bpf_list_push_front(&q->list, &new_skbn->node);
+			if (band == 0)
+				bpf_list_push_front(&q->high, &new_skbn->node);
+			else if (band == 1)
+				bpf_list_push_front(&q->normal, &new_skbn->node);
+			else
+				bpf_list_push_front(&q->low, &new_skbn->node);
 			bpf_spin_unlock(&q->lock);
 		} else {
 			// Allocation failed - must drop
@@ -379,7 +401,11 @@ void BPF_PROG(shapebpf_reset, struct Qdisc *sch)
 		struct sk_buff *skb = NULL;
 
 		bpf_spin_lock(&q->lock);
-		node = bpf_list_pop_front(&q->list);
+		node = bpf_list_pop_front(&q->high);
+		if (!node)
+			node = bpf_list_pop_front(&q->normal);
+		if (!node)
+			node = bpf_list_pop_front(&q->low);
 		bpf_spin_unlock(&q->lock);
 
 		if (!node)

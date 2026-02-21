@@ -239,6 +239,10 @@
           inherit pkgs;
           shapebpfModule = self.nixosModules.default;
         };
+        priority = import ./nix/tests/priority.nix {
+          inherit pkgs;
+          shapebpfModule = self.nixosModules.default;
+        };
       });
     };
 }
