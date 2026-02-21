@@ -636,10 +636,16 @@ impl App {
 
     /// Update visible_rows from terminal size (called once per frame before draw).
     pub fn update_visible_rows(&mut self) {
-        // Table height = terminal height - borders(2) - header(1) - status bar(1) - title bar (varies)
-        // Use a conservative estimate: subtract 4 for borders + header + status bar
+        // Table height = terminal height - borders(2) - header(1) - status bar(1)
+        // When search/filter bar is visible, subtract 1 more for that row
+        let filter_bar_active = self.mode == AppMode::Search
+            || self.mode == AppMode::Filter
+            || !self.active_filter.is_empty()
+            || !self.search_match_indices.is_empty()
+            || !self.search_match_paths.is_empty();
+        let chrome = if filter_bar_active { 5 } else { 4 };
         self.visible_rows = crossterm::terminal::size()
-            .map(|(_, h)| (h as usize).saturating_sub(4))
+            .map(|(_, h)| (h as usize).saturating_sub(chrome))
             .unwrap_or(20);
     }
 
