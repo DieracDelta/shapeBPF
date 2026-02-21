@@ -131,10 +131,18 @@ int shapebpf_ingress(struct __sk_buff *skb)
 				update_ingress_stats(cgroup_id, len);
 				return 1; // allow
 			} else {
-				// Update refill time even on drop so tokens
-				// continue accumulating
+				// Over limit — try ECN marking first (lossless
+				// congestion signal), fall back to drop
 				ts->tokens = tokens;
 				ts->last_refill_ns = now;
+
+				if (bpf_skb_ecn_set_ce(skb)) {
+					// CE set — deliver marked packet
+					update_ingress_stats(cgroup_id, len);
+					return 1; // allow (ECN-marked)
+				}
+
+				// Non-ECN traffic — must drop
 				update_ingress_drops(cgroup_id);
 				return 0; // drop
 			}
