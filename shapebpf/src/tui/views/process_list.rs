@@ -351,7 +351,8 @@ pub fn draw(f: &mut Frame, app: &App) {
     let filter_bar_active = app.mode == AppMode::Search
         || app.mode == AppMode::Filter
         || !app.active_filter.is_empty()
-        || !app.search_match_indices.is_empty();
+        || !app.search_match_indices.is_empty()
+        || !app.search_match_paths.is_empty();
     let constraints = if filter_bar_active {
         vec![
             Constraint::Min(10),   // main table
@@ -400,7 +401,13 @@ pub fn draw(f: &mut Frame, app: &App) {
                 .cloned()
                 .collect()
         };
-        let tree_rows = build_cgroup_tree(&filtered_stats, &app.collapsed_cgroups);
+        let empty = HashSet::new();
+        let effective_collapsed = if app.active_filter.is_empty() {
+            &app.collapsed_cgroups
+        } else {
+            &empty // expand all nodes when filtering
+        };
+        let tree_rows = build_cgroup_tree(&filtered_stats, effective_collapsed);
         tree_rows
             .iter()
             .enumerate()
@@ -551,11 +558,16 @@ pub fn draw(f: &mut Frame, app: &App) {
         } else {
             ""
         };
-        let match_info = if !app.search_match_indices.is_empty() {
+        let match_total = if app.tree_view {
+            app.search_match_paths.len()
+        } else {
+            app.search_match_indices.len()
+        };
+        let match_info = if match_total > 0 {
             format!(
                 " [{}/{}]",
                 app.search_match_pos + 1,
-                app.search_match_indices.len()
+                match_total
             )
         } else {
             String::new()

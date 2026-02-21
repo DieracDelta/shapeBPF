@@ -296,6 +296,8 @@ pub struct App {
     pub search_match_indices: Vec<usize>,
     /// Current position within search_match_indices (for n/N navigation)
     pub search_match_pos: usize,
+    /// Match descriptors for resolving after fold changes: (full_path, Option<pid>)
+    pub search_match_paths: Vec<(String, Option<u32>)>,
 }
 
 impl App {
@@ -329,6 +331,7 @@ impl App {
             active_filter: String::new(),
             search_match_indices: Vec::new(),
             search_match_pos: 0,
+            search_match_paths: Vec::new(),
         }
     }
 
@@ -368,10 +371,16 @@ impl App {
                     .cloned()
                     .collect()
             };
+            let empty = HashSet::new();
+            let effective_collapsed = if self.active_filter.is_empty() {
+                &self.collapsed_cgroups
+            } else {
+                &empty // expand all nodes when filtering
+            };
             self.tree_visible_count =
                 super::views::process_list::build_cgroup_tree(
                     &filtered_stats,
-                    &self.collapsed_cgroups,
+                    effective_collapsed,
                 )
                 .len();
         }
@@ -392,6 +401,7 @@ impl App {
 
     fn update_search_matches(&mut self) {
         self.search_match_indices.clear();
+        self.search_match_paths.clear();
         if self.search_query.is_empty() {
             return;
         }
@@ -405,19 +415,26 @@ impl App {
                     .cloned()
                     .collect()
             };
+            // Search the fully-expanded tree so folded items are included
+            let expanded = HashSet::new();
             let rows = super::views::process_list::build_cgroup_tree(
                 &filtered_stats,
-                &self.collapsed_cgroups,
+                &expanded,
             );
             let q = self.search_query.to_lowercase();
-            for (i, row) in rows.iter().enumerate() {
+            for row in rows.iter() {
                 let matches = row.full_path.to_lowercase().contains(&q)
                     || row.processes.to_lowercase().contains(&q)
                     || row.label.to_lowercase().contains(&q);
                 if matches {
-                    self.search_match_indices.push(i);
+                    let pid = match &row.kind {
+                        super::views::process_list::TreeRowKind::Process { pid } => Some(*pid),
+                        _ => None,
+                    };
+                    self.search_match_paths.push((row.full_path.clone(), pid));
                 }
             }
+            self.resolve_search_indices();
         } else if self.active_filter.is_empty() {
             for (i, stat) in self.stats.iter().enumerate() {
                 if Self::matches_query(stat, &self.search_query) {
@@ -437,6 +454,73 @@ impl App {
             }
         }
         self.search_match_pos = 0;
+    }
+
+    /// Rebuild `search_match_indices` from `search_match_paths` against the current visible tree.
+    fn resolve_search_indices(&mut self) {
+        self.search_match_indices.clear();
+        if self.search_match_paths.is_empty() {
+            return;
+        }
+        let filtered_stats: Vec<CgroupStats> = if self.active_filter.is_empty() {
+            self.stats.clone()
+        } else {
+            self.stats
+                .iter()
+                .filter(|s| Self::matches_query(s, &self.active_filter))
+                .cloned()
+                .collect()
+        };
+        let rows = super::views::process_list::build_cgroup_tree(
+            &filtered_stats,
+            &self.collapsed_cgroups,
+        );
+        for (full_path, pid) in &self.search_match_paths {
+            for (i, row) in rows.iter().enumerate() {
+                let kind_matches = match (&row.kind, pid) {
+                    (super::views::process_list::TreeRowKind::Process { pid: rp }, Some(p)) => {
+                        rp == p
+                    }
+                    (super::views::process_list::TreeRowKind::CgroupNode, None) => true,
+                    _ => false,
+                };
+                if &row.full_path == full_path && kind_matches {
+                    self.search_match_indices.push(i);
+                    break;
+                }
+            }
+            // If not found (inside fold), skip — reveal_search_match will expand it
+        }
+    }
+
+    /// When n/N jumps to a match inside a fold, expand ancestor nodes so it becomes visible.
+    fn reveal_search_match(&mut self) {
+        if self.search_match_paths.is_empty() {
+            return;
+        }
+        let (full_path, _pid) = &self.search_match_paths[self.search_match_pos];
+
+        // Expand all ancestors: /a → /a/b → /a/b/c
+        let segments: Vec<&str> = full_path.split('/').filter(|s| !s.is_empty()).collect();
+        let mut path = String::new();
+        for seg in &segments {
+            path = if path.is_empty() {
+                format!("/{seg}")
+            } else {
+                format!("{path}/{seg}")
+            };
+            self.collapsed_cgroups.remove(&path);
+        }
+
+        // Re-resolve indices against newly expanded tree
+        self.update_tree_visible_count();
+        self.resolve_search_indices();
+
+        // Find and jump to the current match
+        if let Some(&idx) = self.search_match_indices.get(self.search_match_pos) {
+            self.selected_index = idx;
+            self.adjust_scroll();
+        }
     }
 
     fn filtered_stats_len(&self) -> usize {
@@ -777,11 +861,13 @@ impl App {
                 AppMode::ProcessList
                     if code == KeyCode::Esc
                         && (!self.active_filter.is_empty()
-                            || !self.search_match_indices.is_empty()) =>
+                            || !self.search_match_indices.is_empty()
+                            || !self.search_match_paths.is_empty()) =>
                 {
                     self.active_filter.clear();
                     self.search_query.clear();
                     self.search_match_indices.clear();
+                    self.search_match_paths.clear();
                     self.search_match_pos = 0;
                     self.selected_index = 0;
                     self.scroll_offset = 0;
@@ -995,6 +1081,7 @@ impl App {
             KeyCode::Char('/') if self.mode == AppMode::ProcessList => {
                 self.search_query.clear();
                 self.search_match_indices.clear();
+                self.search_match_paths.clear();
                 self.search_match_pos = 0;
                 self.mode = AppMode::Search;
             }
@@ -1004,24 +1091,41 @@ impl App {
             }
             KeyCode::Char('n')
                 if self.mode == AppMode::ProcessList
-                    && !self.search_match_indices.is_empty() =>
+                    && ((self.tree_view && !self.search_match_paths.is_empty())
+                        || (!self.tree_view && !self.search_match_indices.is_empty())) =>
             {
-                self.search_match_pos =
-                    (self.search_match_pos + 1) % self.search_match_indices.len();
-                self.selected_index = self.search_match_indices[self.search_match_pos];
-                self.adjust_scroll();
+                if self.tree_view {
+                    self.search_match_pos =
+                        (self.search_match_pos + 1) % self.search_match_paths.len();
+                    self.reveal_search_match();
+                } else {
+                    self.search_match_pos =
+                        (self.search_match_pos + 1) % self.search_match_indices.len();
+                    self.selected_index = self.search_match_indices[self.search_match_pos];
+                    self.adjust_scroll();
+                }
             }
             KeyCode::Char('N')
                 if self.mode == AppMode::ProcessList
-                    && !self.search_match_indices.is_empty() =>
+                    && ((self.tree_view && !self.search_match_paths.is_empty())
+                        || (!self.tree_view && !self.search_match_indices.is_empty())) =>
             {
-                if self.search_match_pos == 0 {
-                    self.search_match_pos = self.search_match_indices.len() - 1;
+                if self.tree_view {
+                    if self.search_match_pos == 0 {
+                        self.search_match_pos = self.search_match_paths.len() - 1;
+                    } else {
+                        self.search_match_pos -= 1;
+                    }
+                    self.reveal_search_match();
                 } else {
-                    self.search_match_pos -= 1;
+                    if self.search_match_pos == 0 {
+                        self.search_match_pos = self.search_match_indices.len() - 1;
+                    } else {
+                        self.search_match_pos -= 1;
+                    }
+                    self.selected_index = self.search_match_indices[self.search_match_pos];
+                    self.adjust_scroll();
                 }
-                self.selected_index = self.search_match_indices[self.search_match_pos];
-                self.adjust_scroll();
             }
             _ => {}
         }
@@ -1237,6 +1341,7 @@ impl App {
                 if self.mode == AppMode::Search {
                     self.search_query.clear();
                     self.search_match_indices.clear();
+                    self.search_match_paths.clear();
                 } else {
                     self.search_query.clear();
                     self.active_filter.clear();
@@ -1246,7 +1351,10 @@ impl App {
             KeyCode::Enter => {
                 if self.mode == AppMode::Search {
                     self.update_search_matches();
-                    if let Some(&idx) = self.search_match_indices.first() {
+                    if self.tree_view && !self.search_match_paths.is_empty() {
+                        self.search_match_pos = 0;
+                        self.reveal_search_match();
+                    } else if let Some(&idx) = self.search_match_indices.first() {
                         self.selected_index = idx;
                         self.adjust_scroll();
                     }
@@ -1254,6 +1362,7 @@ impl App {
                     self.active_filter = self.search_query.clone();
                     self.selected_index = 0;
                     self.scroll_offset = 0;
+                    self.update_tree_visible_count();
                 }
                 self.mode = AppMode::ProcessList;
             }
